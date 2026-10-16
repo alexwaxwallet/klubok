@@ -3,7 +3,7 @@
 //! Запись `recordings/bylins-login-look.bin`: подключение, MCCP v2, MSDP,
 //! выбор кодировки UTF-8, вход Тестером, «смотреть», «выходы».
 
-use klubok_core::{SessionConfig, SessionOutput, replay};
+use klubok_core::{Automation, SessionConfig, SessionOutput, replay};
 
 const RECORDING: &[u8] = include_bytes!("../../../recordings/bylins-login-look.bin");
 
@@ -25,7 +25,7 @@ fn запись_начинается_с_mccp() {
 
 #[test]
 fn вход_и_осмотр_комнаты() {
-    let out = replay(SessionConfig::default(), RECORDING, 4096).unwrap();
+    let out = replay(SessionConfig::default(), Automation::new(), RECORDING, 4096).unwrap();
     let lines = texts(&out);
 
     assert!(lines.iter().any(|l| l == "Тронный зал"));
@@ -53,9 +53,25 @@ fn вход_и_осмотр_комнаты() {
 
 #[test]
 fn нарезка_пакетов_не_влияет_на_результат() {
-    let whole = texts(&replay(SessionConfig::default(), RECORDING, usize::MAX).unwrap());
+    let whole = texts(
+        &replay(
+            SessionConfig::default(),
+            Automation::new(),
+            RECORDING,
+            usize::MAX,
+        )
+        .unwrap(),
+    );
     for chunk in [1, 3, 17, 512] {
-        let pieces = texts(&replay(SessionConfig::default(), RECORDING, chunk).unwrap());
+        let pieces = texts(
+            &replay(
+                SessionConfig::default(),
+                Automation::new(),
+                RECORDING,
+                chunk,
+            )
+            .unwrap(),
+        );
         assert_eq!(pieces, whole, "размер куска {chunk}");
     }
 }

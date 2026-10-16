@@ -70,6 +70,49 @@ impl StyledLine {
             }),
         }
     }
+
+    /// Меняет стиль куска текста `range` (байтовые смещения в `text()`, как у `regex`).
+    pub fn restyle(&mut self, range: std::ops::Range<usize>, change: impl Fn(&mut Style)) {
+        let mut out = StyledLine::default();
+        let mut offset = 0;
+        for span in &self.spans {
+            let (start, end) = (offset, offset + span.text.len());
+            offset = end;
+            // Делим кусок на три части: до диапазона, внутри, после.
+            let cut_a = range.start.clamp(start, end) - start;
+            let cut_b = range.end.clamp(start, end) - start;
+            out.push(&span.text[..cut_a], span.style);
+            let mut inside = span.style;
+            change(&mut inside);
+            out.push(&span.text[cut_a..cut_b], inside);
+            out.push(&span.text[cut_b..], span.style);
+        }
+        *self = out;
+    }
+
+    /// Заменяет кусок текста `range` на `replacement`. Замена берёт стиль первого заменённого символа.
+    pub fn replace(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        let mut out = StyledLine::default();
+        let mut offset = 0;
+        let mut inserted = false;
+        for span in &self.spans {
+            let (start, end) = (offset, offset + span.text.len());
+            offset = end;
+            let cut_a = range.start.clamp(start, end) - start;
+            let cut_b = range.end.clamp(start, end) - start;
+            out.push(&span.text[..cut_a], span.style);
+            if !inserted && range.start >= start && range.start <= end && cut_a < span.text.len() {
+                out.push(replacement, span.style);
+                inserted = true;
+            }
+            out.push(&span.text[cut_b..], span.style);
+        }
+        if !inserted {
+            let style = self.spans.last().map(|s| s.style).unwrap_or_default();
+            out.push(replacement, style);
+        }
+        *self = out;
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,6 +260,31 @@ mod tests {
         let mut p = AnsiParser::new();
         assert!(p.parse("\x1b[0m  \x1b[33m").is_blank());
         assert!(!p.parse("\x1b[0m .").is_blank());
+    }
+
+    #[test]
+    fn перекраска_куска() {
+        let mut line = AnsiParser::new().parse("\x1b[31mкрасный\x1b[0m и обычный");
+        let start = line.text().find("и").unwrap();
+        line.restyle(start..start + "и".len(), |s| s.fg = Color::Named(2));
+        assert_eq!(line.text(), "красный и обычный");
+        assert_eq!(line.spans.len(), 4);
+        assert_eq!(line.spans[2].text, "и");
+        assert_eq!(line.spans[2].style.fg, Color::Named(2));
+    }
+
+    #[test]
+    fn замена_куска() {
+        let mut line = AnsiParser::new().parse("\x1b[31mВася\x1b[0m ударил вас.");
+        line.replace(0.."Вася".len(), "Тролль");
+        assert_eq!(line.text(), "Тролль ударил вас.");
+        assert_eq!(line.spans[0].style.fg, Color::Named(1));
+
+        let mut line = StyledLine::plain("abc");
+        line.replace(1..3, "XY");
+        assert_eq!(line.text(), "aXY");
+        line.replace(3..3, "!");
+        assert_eq!(line.text(), "aXY!");
     }
 
     #[test]

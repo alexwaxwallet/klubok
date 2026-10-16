@@ -2,19 +2,24 @@
   import { onMount } from "svelte";
   import Output, { type OutputLine } from "$lib/Output.svelte";
   import CommandInput from "$lib/CommandInput.svelte";
+  import ProfileDialog from "$lib/ProfileDialog.svelte";
+  import { matches, parseKey, type KeyMatcher } from "$lib/hotkeys";
   import {
     connect,
     disconnect,
+    listProfiles,
     onSession,
     plainText,
     send,
     type Exit,
+    type Hotkey,
+    type ProfileInfo,
     type SessionEvent,
   } from "$lib/session";
 
   /** Сколько строк держать на экране (дальше — старые выбрасываются). */
   const SCROLLBACK = 5000;
-  const SETTINGS_KEY = "klubok.connection";
+  const LAST_PROFILE_KEY = "klubok.lastProfile";
 
   /** Выходы из MSDP: подпись на кнопке и команда, которую она отправляет. */
   const DIRECTIONS: Record<string, { label: string; command: string }> = {
@@ -37,11 +42,17 @@
   let lines: OutputLine[] = $state.raw([]);
   let connected = $state(false);
   let room: Room | null = $state(null);
-  let host = $state("127.0.0.1");
-  let port = $state(4000);
-  let charset = $state("utf8");
+  let profiles: ProfileInfo[] = $state([]);
+  let passwordStorage = $state("");
+  let selectedId = $state("");
+  /** Открытый диалог профиля: undefined — закрыт, null — новый профиль. */
+  let editing: ProfileInfo | null | undefined = $state(undefined);
+  let hotkeys: { matcher: KeyMatcher; body: string }[] = [];
   let nextId = 0;
   let commandInput: CommandInput;
+  let audio: AudioContext | null = null;
+
+  let selected = $derived(profiles.find((p) => p.id === selectedId));
 
   /** Последний промпт спрашивает пароль. */
   let askingPassword = $derived.by(() => {
@@ -60,12 +71,38 @@
     lines = all.length > SCROLLBACK ? all.slice(all.length - SCROLLBACK) : all;
   }
 
-  function note(kind: "info" | "error", text: string) {
-    append([{ id: nextId++, kind, spans: [{ text }] }]);
+  function note(kind: OutputLine["kind"], text: string) {
+    append(text.split("\n").map((t) => ({ id: nextId++, kind, spans: [{ text: t }] })));
+  }
+
+  function setHotkeys(list: Hotkey[]) {
+    hotkeys = list.flatMap((h) => {
+      const matcher = parseKey(h.key);
+      return matcher ? [{ matcher, body: h.body }] : [];
+    });
+  }
+
+  function bell() {
+    try {
+      audio ??= new AudioContext();
+      const osc = audio.createOscillator();
+      const gain = audio.createGain();
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.15, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.25);
+      osc.connect(gain).connect(audio.destination);
+      osc.start();
+      osc.stop(audio.currentTime + 0.25);
+    } catch {
+      // звук недоступен — не страшно
+    }
   }
 
   function handleBatch(batch: SessionEvent[]) {
     const fresh: OutputLine[] = [];
+    const add = (kind: OutputLine["kind"], text: string) => {
+      for (const t of text.split("\n")) fresh.push({ id: nextId++, kind, spans: [{ text: t }] });
+    };
     for (const event of batch) {
       switch (event.type) {
         case "line":
@@ -75,12 +112,24 @@
         case "room":
           room = event;
           break;
+        case "echo":
+          add("echo", event.text);
+          break;
+        case "warning":
+          add("warning", event.text);
+          break;
         case "error":
-          fresh.push({ id: nextId++, kind: "error", spans: [{ text: event.text }] });
+          add("error", event.text);
           connected = false;
           break;
+        case "bell":
+          bell();
+          break;
+        case "hotkeys":
+          setHotkeys(event.hotkeys);
+          break;
         case "disconnected":
-          fresh.push({ id: nextId++, kind: "info", spans: [{ text: "Соединение закрыто." }] });
+          add("info", "Соединение закрыто.");
           connected = false;
           break;
         case "info":
@@ -90,16 +139,34 @@
     if (fresh.length > 0) append(fresh);
   }
 
-  async function doConnect() {
+  async function refreshProfiles() {
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ host, port, charset }));
+      const list = await listProfiles();
+      profiles = list.profiles;
+      passwordStorage = list.password_storage;
+      if (!profiles.some((p) => p.id === selectedId)) {
+        selectedId = profiles[0]?.id ?? "";
+      }
+    } catch (error) {
+      note("error", String(error));
+    }
+  }
+
+  async function doConnect() {
+    if (!selected) {
+      editing = null;
+      return;
+    }
+    try {
+      localStorage.setItem(LAST_PROFILE_KEY, selectedId);
     } catch {
       // хранилище недоступно — не страшно
     }
-    note("info", `Подключаюсь к ${host}:${port}…`);
+    const { profile } = selected;
+    note("info", `Подключаюсь к ${profile.host}:${profile.port} (${profile.name})…`);
     room = null;
     try {
-      await connect(host, port, charset);
+      await connect(selectedId);
       connected = true;
       commandInput.focus();
     } catch (error) {
@@ -107,8 +174,14 @@
     }
   }
 
-  async function doDisconnect() {
-    await disconnect();
+  /** Показывает введённое после промпта. */
+  function echo(shown: string) {
+    const last = lines[lines.length - 1];
+    if (last?.kind === "prompt" && last.echo === undefined) {
+      lines = [...lines.slice(0, -1), { ...last, echo: shown }];
+    } else {
+      append([{ id: nextId++, kind: "line", spans: [], echo: shown }]);
+    }
   }
 
   async function submit(text: string) {
@@ -116,29 +189,38 @@
       note("error", "Нет подключения.");
       return;
     }
-    // Показываем введённое после промпта (пароль — звёздочками).
+    // Пароль и «Имя Пароль» на входе уходят как есть: в пароле могут быть «;» и «#».
+    const raw = askingPassword || askingName;
     let shown = text;
     if (askingPassword) {
       shown = "*".repeat(text.length);
     } else if (askingName) {
-      // «Имя Пароль» — прячем всё после имени.
       shown = text.replace(/^(\S+)\s+(.+)$/, (_, name, pass) => `${name} ${"*".repeat(pass.length)}`);
     }
-    const last = lines[lines.length - 1];
-    if (last?.kind === "prompt" && last.echo === undefined) {
-      lines = [...lines.slice(0, -1), { ...last, echo: shown }];
-    } else {
-      append([{ id: nextId++, kind: "line", spans: [], echo: shown }]);
-    }
+    echo(shown);
     try {
-      await send(text);
+      await send(text, raw);
     } catch (error) {
       note("error", String(error));
     }
   }
 
+  /** Горячие клавиши проверяются до поля ввода, чтобы цифровой блок не печатал цифры. */
+  function onKeydownCapture(event: KeyboardEvent) {
+    if (!connected || editing !== undefined) return;
+    // Ctrl+C с выделенным текстом — копирование, а не горячая клавиша.
+    if (event.ctrlKey && event.code === "KeyC" && window.getSelection()?.toString()) return;
+    const hit = hotkeys.find((h) => matches(h.matcher, event));
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    echo(hit.body);
+    send(hit.body).catch((error) => note("error", String(error)));
+  }
+
   /** Любая буква, набранная вне поля ввода, уходит в поле ввода. */
   function onWindowKeydown(event: KeyboardEvent) {
+    if (editing !== undefined) return;
     const target = event.target as HTMLElement;
     if (target.closest("input, select, button")) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -147,13 +229,22 @@
     }
   }
 
+  async function closeDialog(savedId?: string | null) {
+    editing = undefined;
+    await refreshProfiles();
+    if (savedId) selectedId = savedId;
+    commandInput.focus();
+  }
+
   onMount(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
-      if (saved) ({ host, port, charset } = saved);
+      selectedId = localStorage.getItem(LAST_PROFILE_KEY) ?? "";
     } catch {
-      // нет сохранённых настроек
+      // нет сохранённого выбора
     }
+    refreshProfiles().then(() => {
+      if (profiles.length === 0) editing = null; // первый запуск — сразу создать профиль
+    });
     const unlisten = onSession(handleBatch);
     commandInput.focus();
     return () => {
@@ -162,36 +253,30 @@
   });
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydowncapture={onKeydownCapture} onkeydown={onWindowKeydown} />
 
 <div class="app">
   <header>
     <span class="logo">Клубок</span>
-    <form
-      class="connection"
-      onsubmit={(e) => {
-        e.preventDefault();
-        if (connected) doDisconnect();
-        else doConnect();
-      }}
-    >
-      <input class="host" bind:value={host} disabled={connected} aria-label="Адрес" />
-      <input
-        class="port"
-        type="number"
-        bind:value={port}
-        disabled={connected}
-        aria-label="Порт"
-      />
-      <select bind:value={charset} disabled={connected} aria-label="Кодировка">
-        <option value="utf8">UTF-8</option>
-        <option value="koi8r">KOI8-R</option>
-        <option value="cp1251">CP1251</option>
+    <div class="connection">
+      <select bind:value={selectedId} disabled={connected} aria-label="Профиль">
+        {#each profiles as p (p.id)}
+          <option value={p.id}>{p.profile.name}</option>
+        {:else}
+          <option value="">нет профилей</option>
+        {/each}
       </select>
-      <button type="submit" class:active={connected}>
+      <button
+        class="icon"
+        title="Настройки профиля"
+        disabled={!selected}
+        onclick={() => (editing = selected ?? null)}>⚙</button
+      >
+      <button class="icon" title="Новый профиль" onclick={() => (editing = null)}>＋</button>
+      <button class="main" class:active={connected} onclick={() => (connected ? disconnect() : doConnect())}>
         {connected ? "Отключиться" : "Подключиться"}
       </button>
-    </form>
+    </div>
   </header>
 
   <main>
@@ -224,6 +309,10 @@
   </main>
 </div>
 
+{#if editing !== undefined}
+  <ProfileDialog info={editing} {passwordStorage} onclose={closeDialog} />
+{/if}
+
 <style>
   .app {
     display: flex;
@@ -239,7 +328,6 @@
     padding: 6px 10px;
     background: var(--panel);
     border-bottom: 1px solid var(--panel-border);
-    flex-wrap: wrap;
   }
 
   .logo {
@@ -256,37 +344,41 @@
     justify-content: flex-end;
   }
 
-  .connection input,
   .connection select,
   .connection button {
     padding: 4px 8px;
     border: 1px solid var(--panel-border);
     border-radius: 4px;
     background: var(--input-bg);
-  }
-
-  .host {
-    width: 160px;
-    min-width: 0;
-    flex-shrink: 1;
-  }
-
-  .port {
-    width: 72px;
-  }
-
-  .connection button {
     cursor: pointer;
+  }
+
+  .connection select {
+    min-width: 0;
+    max-width: 220px;
+  }
+
+  .connection button.icon {
+    width: 32px;
+    padding: 4px 0;
+  }
+
+  .connection button.main {
     background: var(--accent);
     color: #1a1308;
     border-color: var(--accent);
     font-weight: 600;
   }
 
-  .connection button.active {
+  .connection button.main.active {
     background: var(--input-bg);
     color: var(--text);
     border-color: var(--panel-border);
+  }
+
+  button:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 
   main {
@@ -342,7 +434,7 @@
     border-color: var(--accent);
   }
 
-  /* Узкий экран (телефон): панель комнаты под выводом, поля подключения сжимаются. */
+  /* Узкий экран (телефон): панель комнаты под выводом. */
   @media (max-width: 640px) {
     main {
       flex-direction: column;
@@ -355,12 +447,8 @@
       max-height: 30vh;
     }
 
-    .host {
-      width: 110px;
-    }
-
-    .port {
-      width: 60px;
+    .logo {
+      display: none;
     }
   }
 </style>

@@ -22,6 +22,9 @@ tokio = { version = "1", features = ["sync", "time"] }
 klubok-core.workspace = true
 klubok-proto.workspace = true
 klubok-automation.workspace = true
+anyhow = "1.0.104"
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+toml = "1.1.8"
 
 [lints]
 workspace = true

@@ -12,6 +12,8 @@ klubok-automation.workspace = true
 klubok-map.workspace = true
 tokio = { version = "1.53.3", features = ["net", "io-util", "rt", "macros", "sync", "time"] }
 anyhow = "1.0.104"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
 
 [lints]
 workspace = true

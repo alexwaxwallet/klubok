@@ -4,7 +4,7 @@
   /** Строка на экране. */
   export interface OutputLine {
     id: number;
-    kind: "line" | "prompt" | "info" | "error";
+    kind: "line" | "prompt" | "info" | "echo" | "warning" | "error";
     spans: Span[];
     /** Команда, которую игрок ввёл после этого промпта. */
     echo?: string;
@@ -45,10 +45,8 @@
 
 <div class="output" bind:this={viewport} onscroll={onScroll}>
   {#each lines as line (line.id)}
-    <div class="line {line.kind}">
-      {#each line.spans as span, i (i)}<span style={spanStyle(span)}>{span.text}</span>{/each}
-      {#if line.echo !== undefined}<span class="echo">{line.echo}</span>{/if}
-    </div>
+    <!-- Всё в одну строку: в режиме pre-wrap любой перенос в шаблоне стал бы пробелом на экране. -->
+    <div class="line {line.kind}">{#each line.spans as span, i (i)}<span style={spanStyle(span)}>{span.text}</span>{/each}{#if line.echo !== undefined}<span class="typed">{line.echo}</span>{/if}</div>
   {/each}
 </div>
 
@@ -81,6 +79,14 @@
   }
 
   .echo {
+    color: var(--c6);
+  }
+
+  .warning {
+    color: var(--c3);
+  }
+
+  .typed {
     color: var(--accent);
   }
 </style>

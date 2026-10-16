@@ -48,10 +48,29 @@ pub enum UiEvent {
     Info {
         text: String,
     },
+    /// Сообщение клиента для игрока (`#output`, списки, автовход).
+    Echo {
+        text: String,
+    },
+    /// Предупреждение (ошибка в команде, неподдерживаемая команда).
+    Warning {
+        text: String,
+    },
     Error {
         text: String,
     },
+    Bell,
+    Hotkeys {
+        hotkeys: Vec<UiHotkey>,
+    },
     Disconnected,
+}
+
+/// Горячая клавиша: `key` в записи JMC (`Ctrl+NUM7`), `body` — что выполнить.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiHotkey {
+    pub key: String,
+    pub body: String,
 }
 
 impl UiEvent {
@@ -67,8 +86,23 @@ impl UiEvent {
             SessionOutput::Msdp(name, value) if name == "ROOM" => Some(room(&value)),
             SessionOutput::Msdp(..) => None,
             SessionOutput::Info(text) => Some(UiEvent::Info { text }),
+            SessionOutput::Echo(text) => Some(UiEvent::Echo { text }),
+            SessionOutput::Warning(text) => Some(UiEvent::Warning { text }),
+            SessionOutput::Bell => Some(UiEvent::Bell),
+            SessionOutput::HotkeysChanged(list) => Some(UiEvent::Hotkeys {
+                hotkeys: list
+                    .into_iter()
+                    .map(|h| UiHotkey {
+                        key: h.key,
+                        body: h.body,
+                    })
+                    .collect(),
+            }),
             SessionOutput::Disconnected => Some(UiEvent::Disconnected),
-            SessionOutput::Send(_) => None,
+            // Сохранение настроек и отправка серверу обрабатываются до интерфейса.
+            SessionOutput::AutomationChanged(_)
+            | SessionOutput::Send(_)
+            | SessionOutput::CloseRequested => None,
         }
     }
 }

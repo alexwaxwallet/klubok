@@ -18,20 +18,99 @@ export interface Exit {
   vnum: string;
 }
 
+export interface Hotkey {
+  /** Клавиша в записи JMC: `F5`, `Ctrl+NUM7`, `Alt+NUM9`. */
+  key: string;
+  body: string;
+}
+
 export type SessionEvent =
   | { type: "line"; spans: Span[] }
   | { type: "prompt"; spans: Span[] }
   | { type: "room"; vnum: string; name: string; area: string; exits: Exit[] }
   | { type: "info"; text: string }
+  | { type: "echo"; text: string }
+  | { type: "warning"; text: string }
   | { type: "error"; text: string }
+  | { type: "bell" }
+  | { type: "hotkeys"; hotkeys: Hotkey[] }
   | { type: "disconnected" };
 
-export function connect(host: string, port: number, charset: string): Promise<void> {
-  return invoke("connect", { host, port, charset });
+export interface BlankLines {
+  max_consecutive: number;
+  trim_after_prompt: boolean;
+  trim_before_prompt: boolean;
 }
 
-export function send(text: string): Promise<void> {
-  return invoke("send", { text });
+export interface Profile {
+  name: string;
+  host: string;
+  port: number;
+  charset: string;
+  /** Имя персонажа для автовхода. */
+  character: string;
+  blank_lines: BlankLines;
+}
+
+export interface ProfileInfo {
+  id: string;
+  profile: Profile;
+  has_password: boolean;
+}
+
+export interface ProfileList {
+  profiles: ProfileInfo[];
+  data_dir: string;
+  password_storage: string;
+}
+
+export interface ImportResult {
+  aliases: number;
+  actions: number;
+  variables: number;
+  highlights: number;
+  hotkeys: number;
+  substitutions: number;
+  /** Шаблоны триггеров входа (кодировка, имя, пароль). */
+  login_actions: string[];
+  unsupported: [string, number][];
+}
+
+export function newProfile(): Profile {
+  return {
+    name: "",
+    host: "bylins.su",
+    port: 4000,
+    charset: "utf8",
+    character: "",
+    blank_lines: { max_consecutive: 1, trim_after_prompt: true, trim_before_prompt: true },
+  };
+}
+
+export function listProfiles(): Promise<ProfileList> {
+  return invoke("list_profiles");
+}
+
+/** password: undefined — не менять, "" — забыть. Возвращает id профиля. */
+export function saveProfile(id: string | null, profile: Profile, password?: string): Promise<string> {
+  return invoke("save_profile", { id, profile, password: password ?? null });
+}
+
+export function deleteProfile(id: string): Promise<void> {
+  return invoke("delete_profile", { id });
+}
+
+export function importSet(id: string, bytes: Uint8Array): Promise<ImportResult> {
+  return invoke("import_set", { id, bytes: Array.from(bytes) });
+}
+
+export function connect(id: string): Promise<void> {
+  return invoke("connect", { id });
+}
+
+/** raw — отправить как есть, без алиасов и #-команд (для пароля). */
+export function send(text: string, raw = false): Promise<void> {
+  return invoke("send", { text, raw });
 }
 
 export function disconnect(): Promise<void> {

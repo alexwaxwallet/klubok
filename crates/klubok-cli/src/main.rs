@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use klubok_automation::BlankLineSettings;
-use klubok_core::{SessionConfig, SessionOutput};
+use klubok_core::{Automation, SessionConfig, SessionInput, SessionOutput};
 use klubok_proto::{Charset, Color, StyledLine};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -36,6 +36,9 @@ struct Args {
     /// Не убирать пустые строки сразу после промпта.
     #[arg(long)]
     keep_blank_after_prompt: bool,
+    /// Не убирать пустые строки прямо перед промптом.
+    #[arg(long)]
+    keep_blank_before_prompt: bool,
     /// Отключить сжатие MCCP.
     #[arg(long)]
     no_mccp: bool,
@@ -48,6 +51,12 @@ struct Args {
     /// Не подключаться, а прогнать записанный файл.
     #[arg(long, conflicts_with = "record")]
     replay: Option<PathBuf>,
+    /// Загрузить алиасы, триггеры и т.п. из файла `.set` (формат JMC).
+    #[arg(long)]
+    script: Option<PathBuf>,
+    /// Только показать итог импорта `--script` и выйти.
+    #[arg(long, requires = "script")]
+    import_report: bool,
 }
 
 #[tokio::main]
@@ -61,14 +70,37 @@ async fn main() -> anyhow::Result<()> {
         blank_lines: BlankLineSettings {
             max_consecutive: args.max_blank,
             trim_after_prompt: !args.keep_blank_after_prompt,
+            trim_before_prompt: !args.keep_blank_before_prompt,
         },
         ..SessionConfig::default()
     };
     let mut screen = Screen::new(args.debug);
 
+    let mut automation = Automation::new();
+    if let Some(path) = &args.script {
+        let text = klubok_core::decode_settings_file(&std::fs::read(path)?);
+        let report = automation.import(&text);
+        eprintln!(
+            "Импорт {}: алиасов {}, триггеров {}, переменных {}, подсветок {}, горячих клавиш {}, замен {}",
+            path.display(),
+            report.aliases,
+            report.actions,
+            report.variables,
+            report.highlights,
+            report.hotkeys,
+            report.substitutions
+        );
+        for (name, count) in &report.unsupported {
+            eprintln!("  пока не поддерживается: {name} × {count}");
+        }
+        if args.import_report {
+            return Ok(());
+        }
+    }
+
     if let Some(path) = &args.replay {
         let recording = std::fs::read(path)?;
-        for output in klubok_core::replay(config, &recording, 4096)? {
+        for output in klubok_core::replay(config, automation, &recording, 4096)? {
             screen.show(&output);
         }
         screen.finish();
@@ -83,21 +115,25 @@ async fn main() -> anyhow::Result<()> {
     let address = format!("{}:{}", args.host, args.port);
     eprintln!("Подключаюсь к {address}…");
 
-    let (command_tx, command_rx) = mpsc::channel::<String>(64);
+    let (command_tx, command_rx) = mpsc::channel::<SessionInput>(64);
     let (event_tx, mut event_rx) = mpsc::channel::<SessionOutput>(1024);
 
     // Ввод игрока: каждая строка stdin — команда. Конец stdin закрывает сессию.
     tokio::spawn(async move {
         let mut lines = BufReader::new(tokio::io::stdin()).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if command_tx.send(line).await.is_err() {
+            if command_tx
+                .send(SessionInput::UserCommand(line))
+                .await
+                .is_err()
+            {
                 break;
             }
         }
     });
 
     let session = tokio::spawn(async move {
-        klubok_core::run_session(&address, config, command_rx, event_tx, recorder).await
+        klubok_core::run_session(&address, config, automation, command_rx, event_tx, recorder).await
     });
 
     while let Some(output) = event_rx.recv().await {
@@ -142,6 +178,17 @@ impl Screen {
             SessionOutput::Info(text) if self.debug => {
                 self.line_start(&mut out);
                 let _ = writeln!(out, "\x1b[2m[клубок] {text}\x1b[0m");
+            }
+            SessionOutput::Echo(text) => {
+                self.line_start(&mut out);
+                let _ = writeln!(out, "\x1b[36m{text}\x1b[0m");
+            }
+            SessionOutput::Warning(text) => {
+                self.line_start(&mut out);
+                let _ = writeln!(out, "\x1b[33m[клубок] {text}\x1b[0m");
+            }
+            SessionOutput::Bell => {
+                let _ = write!(out, "\x07");
             }
             SessionOutput::Disconnected => {
                 self.line_start(&mut out);
