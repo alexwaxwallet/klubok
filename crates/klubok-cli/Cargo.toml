@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+enable-ansi-support = "0.3.1"
 klubok-automation.workspace = true
 klubok-core.workspace = true
 klubok-proto.workspace = true

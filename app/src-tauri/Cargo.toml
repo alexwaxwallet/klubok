@@ -1,0 +1,27 @@
+[package]
+name = "klubok"
+description = "Клубок — мад-клиент для Былин (окно на Tauri)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Суффикс `_lib` нужен, чтобы имя библиотеки не совпадало с именем бинарника (проблема на Windows).
+name = "klubok_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+klubok-core.workspace = true
+klubok-proto.workspace = true
+klubok-automation.workspace = true
+
+[lints]
+workspace = true

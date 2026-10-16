@@ -53,6 +53,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // В старой консоли Windows ANSI-цвета выключены — включаем. В других системах ничего не делает.
+    let _ = enable_ansi_support::enable_ansi_support();
     let config = SessionConfig {
         charset: args.charset,
         mccp: !args.no_mccp,

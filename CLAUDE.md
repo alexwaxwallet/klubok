@@ -26,7 +26,7 @@
 | `klubok-core` | прикладной слой: `Session` — единственный владелец состояния; входы/выходы — `SessionInput`/`SessionOutput` через mpsc |
 | `klubok-cli` | консольный клиент для отладки ядра без UI |
 | `klubok-script` (позже) | Lua (mlua) |
-| `app/` (позже) | Tauri 2 + Svelte/TS. Фронтенд «тупой»: только рисует и шлёт команды. |
+| `app/` | Tauri 2 + SvelteKit 5/TS. Rust-часть в `app/src-tauri` (крейт `klubok`, член workspace). Фронтенд «тупой»: только рисует и шлёт команды. |
 
 Правила:
 - Зависимости только «внутрь»: `proto` ни от кого не зависит; `core` связывает контексты; UI зависит от `core`.
@@ -45,6 +45,8 @@ cargo clippy --all-targets       # линтер — должен быть чис
 cargo run -p klubok-cli          # консольный клиент
 ./scripts/server.sh start|stop|status|log   # локальный сервер Былин (исходники в ../bylins-server)
 ./scripts/build-windows.sh [папка]           # портативный .exe через cargo-xwin (по умолчанию dist/windows)
+(cd app && npm run check)                    # проверка типов фронтенда
+./scripts/app-headless.sh start|shot|stop    # окно на Xvfb :99 для скриншотов; клики — DISPLAY=:99 xdotool
 ```
 
 ## Протокол Былин
@@ -58,6 +60,10 @@ cargo run -p klubok-cli          # консольный клиент
 - Реальный трафик записывается в `recordings/` и прогоняется через ядро (record/replay) — без сети.
 - Таймауты (merge, тикеры) тестируются через управляемый `Clock`, не через `sleep`.
 - Для ручной проверки — локальный сервер: `./scripts/server.sh start`, затем `cargo run -p klubok-cli`.
+- Изменения интерфейса проверяй глазами: `scripts/app-headless.sh start`, подключение кликом через xdotool,
+  `scripts/app-headless.sh shot` и Read скриншота.
+- Ввод: после отправки строка очищается (как в JMC). Пароль (по промпту) и «Имя Пароль» на входе
+  не попадают в историю и маскируются в эхе.
 
 ## Сборка релизов
 

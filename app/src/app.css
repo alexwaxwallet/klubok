@@ -1,0 +1,56 @@
+/* Тема Клубка. Цвета c0–c15 — 16 стандартных цветов мада (ANSI). */
+
+:root {
+  --bg: #101114;
+  --panel: #17191e;
+  --panel-border: #2a2d35;
+  --text: #c8c8c8;
+  --muted: #7d828c;
+  --accent: #d9a35b;
+  --danger: #e06c6c;
+  --input-bg: #1d2026;
+
+  --c0: #3a3d44;
+  --c1: #c0504d;
+  --c2: #5fa85f;
+  --c3: #c8a040;
+  --c4: #4f78c8;
+  --c5: #a860b0;
+  --c6: #45a8b0;
+  --c7: #c8c8c8;
+  --c8: #6c707a;
+  --c9: #ff6b66;
+  --c10: #7ee07e;
+  --c11: #ffe066;
+  --c12: #6fa0ff;
+  --c13: #e080f0;
+  --c14: #66e0e8;
+  --c15: #ffffff;
+
+  --mono: "Cascadia Mono", "Consolas", "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --font-size: 15px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, "Segoe UI", sans-serif;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
