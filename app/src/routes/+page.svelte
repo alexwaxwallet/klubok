@@ -3,7 +3,7 @@
   import Output, { type OutputLine } from "$lib/Output.svelte";
   import CommandInput from "$lib/CommandInput.svelte";
   import ProfileDialog from "$lib/ProfileDialog.svelte";
-  import { matches, parseKey, type KeyMatcher } from "$lib/hotkeys";
+  import { describeEvent, eventKeyName, normalizeSpec } from "$lib/hotkeys";
   import {
     connect,
     disconnect,
@@ -47,7 +47,12 @@
   let selectedId = $state("");
   /** Открытый диалог профиля: undefined — закрыт, null — новый профиль. */
   let editing: ProfileInfo | null | undefined = $state(undefined);
-  let hotkeys: { matcher: KeyMatcher; body: string }[] = [];
+  /** Горячие клавиши: каноническое имя (`Ctrl+NUM7`) → команды. */
+  let hotkeys = new Map<string, string>();
+  /** Режим #keytest: показывать, что пришло от каждой нажатой клавиши. */
+  let keytest = false;
+  /** До какого момента глушить ввод символа после Alt+цифровой блок (Alt-коды Windows). */
+  let swallowInputUntil = 0;
   let nextId = 0;
   let commandInput: CommandInput;
   let audio: AudioContext | null = null;
@@ -76,10 +81,17 @@
   }
 
   function setHotkeys(list: Hotkey[]) {
-    hotkeys = list.flatMap((h) => {
-      const matcher = parseKey(h.key);
-      return matcher ? [{ matcher, body: h.body }] : [];
-    });
+    hotkeys = new Map();
+    for (const h of list) {
+      const name = normalizeSpec(h.key);
+      if (!name) continue;
+      hotkeys.set(name, h.body);
+      // «Ctrl+RETURN» в JMC — любой Enter с Ctrl; голый RETURN — только Enter цифрового блока,
+      // потому что обычный Enter отправляет команду.
+      if (name.endsWith("RETURN") && name !== "RETURN") {
+        hotkeys.set(name.replace(/RETURN$/, "ENTER"), h.body);
+      }
+    }
   }
 
   function bell() {
@@ -185,6 +197,16 @@
   }
 
   async function submit(text: string) {
+    if (text.trim().toLowerCase() === "#keytest") {
+      keytest = !keytest;
+      note(
+        "echo",
+        keytest
+          ? "Проверка клавиш включена: нажимайте клавиши, повторите #keytest, чтобы выключить."
+          : "Проверка клавиш выключена.",
+      );
+      return;
+    }
     if (!connected) {
       note("error", "Нет подключения.");
       return;
@@ -207,15 +229,37 @@
 
   /** Горячие клавиши проверяются до поля ввода, чтобы цифровой блок не печатал цифры. */
   function onKeydownCapture(event: KeyboardEvent) {
-    if (!connected || editing !== undefined) return;
+    if (editing !== undefined) return;
+    const name = eventKeyName(event);
+    if (keytest && name !== null) {
+      const bound = hotkeys.get(name);
+      note("echo", `[клавиша] ${name}  ←  ${describeEvent(event)}${bound !== undefined ? `  →  ${bound}` : ""}`);
+    }
+    if (!connected || name === null) return;
     // Ctrl+C с выделенным текстом — копирование, а не горячая клавиша.
-    if (event.ctrlKey && event.code === "KeyC" && window.getSelection()?.toString()) return;
-    const hit = hotkeys.find((h) => matches(h.matcher, event));
-    if (!hit) return;
+    if (name === "Ctrl+C" && window.getSelection()?.toString()) return;
+    const body = hotkeys.get(name);
+    if (body === undefined) return;
     event.preventDefault();
     event.stopPropagation();
-    echo(hit.body);
-    send(hit.body).catch((error) => note("error", String(error)));
+    if (event.altKey) swallowInputUntil = performance.now() + 1000;
+    echo(body);
+    send(body).catch((error) => note("error", String(error)));
+  }
+
+  /** Windows после Alt+цифра на цифровом блоке вставляет символ по Alt-коду — не пускаем его. */
+  function onBeforeInputCapture(event: InputEvent) {
+    if (performance.now() < swallowInputUntil) {
+      event.preventDefault();
+      swallowInputUntil = 0;
+    }
+  }
+
+  function onKeyupCapture(event: KeyboardEvent) {
+    // Alt отпущен — Alt-код уже не придёт; через мгновение снимаем запрет.
+    if (event.key === "Alt" && swallowInputUntil > 0) {
+      setTimeout(() => (swallowInputUntil = 0), 50);
+    }
   }
 
   /** Любая буква, набранная вне поля ввода, уходит в поле ввода. */
@@ -253,7 +297,12 @@
   });
 </script>
 
-<svelte:window onkeydowncapture={onKeydownCapture} onkeydown={onWindowKeydown} />
+<svelte:window
+  onkeydowncapture={onKeydownCapture}
+  onkeyupcapture={onKeyupCapture}
+  onbeforeinputcapture={onBeforeInputCapture}
+  onkeydown={onWindowKeydown}
+/>
 
 <div class="app">
   <header>
