@@ -46,6 +46,11 @@ cargo run -p klubok-cli          # консольный клиент
 ./scripts/server.sh start|stop|status|log   # локальный сервер Былин (исходники в ../bylins-server)
 ```
 
+## Протокол Былин
+
+Факты о сервере (telnet-опции, MCCP, MSDP ROOM, кодировки, промпт/GA, переводы строк) — в
+[`docs/bylins-protocol.md`](docs/bylins-protocol.md). Читай его перед работой над `proto` и маппером.
+
 ## Тестирование
 
 - Парсеры в `proto` покрываются юнит-тестами на байтах.
