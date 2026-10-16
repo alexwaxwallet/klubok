@@ -7,7 +7,7 @@ mod secrets;
 mod ui;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use klubok_core::{
@@ -40,6 +40,9 @@ struct AppState {
     secrets: Secrets,
     /// Канал ввода текущего подключения и id его профиля.
     connection: Mutex<Option<(String, mpsc::Sender<SessionInput>)>>,
+    /// Последний текст настроек подключённого профиля: на диск он попадает с задержкой,
+    /// а редактору нужен свежий.
+    latest_automation: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -309,6 +312,41 @@ async fn import_mm2(
     .map_err(err)?
 }
 
+/// Настройки автоматизации профиля текстом JMC (для редактора).
+#[tauri::command]
+fn get_automation(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    if state.connected_profile().as_deref() == Some(id.as_str())
+        && let Some(text) = state.latest_automation.lock().map_err(err)?.clone()
+    {
+        return Ok(text);
+    }
+    state.store.load_automation(&id).map_err(err)
+}
+
+/// Сохраняет настройки из редактора. Если профиль подключён — сессия сразу их применит.
+#[tauri::command]
+async fn set_automation(
+    state: State<'_, AppState>,
+    id: String,
+    text: String,
+) -> Result<(), String> {
+    let sender = state
+        .connection
+        .lock()
+        .map_err(err)?
+        .as_ref()
+        .filter(|(connected, tx)| *connected == id && !tx.is_closed())
+        .map(|(_, tx)| tx.clone());
+    match sender {
+        // Сессия пришлёт AutomationChanged, и текст сохранится как обычно.
+        Some(tx) => tx
+            .send(SessionInput::ReplaceAutomation(text))
+            .await
+            .map_err(|_| "нет подключения".to_string()),
+        None => state.store.save_automation(&id, &text).map_err(err),
+    }
+}
+
 // ───────────────────────────── подключение ─────────────────────────────
 
 #[tauri::command]
@@ -359,7 +397,11 @@ fn connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(),
         }
     });
     let store = state.store.clone();
-    tauri::async_runtime::spawn(forward_events(app, event_rx, store, id));
+    if let Ok(mut latest) = state.latest_automation.lock() {
+        *latest = None;
+    }
+    let latest = state.latest_automation.clone();
+    tauri::async_runtime::spawn(forward_events(app, event_rx, store, id, latest));
     Ok(())
 }
 
@@ -399,6 +441,7 @@ async fn forward_events(
     mut events: mpsc::Receiver<SessionOutput>,
     store: ProfileStore,
     profile_id: String,
+    latest: Arc<Mutex<Option<String>>>,
 ) {
     // Последний несохранённый текст настроек.
     let mut unsaved: Option<String> = None;
@@ -435,7 +478,12 @@ async fn forward_events(
 
         let mut batch: Vec<UiEvent> = Vec::new();
         let mut take = |event: SessionOutput, batch: &mut Vec<UiEvent>| match event {
-            SessionOutput::AutomationChanged(text) => unsaved = Some(text),
+            SessionOutput::AutomationChanged(text) => {
+                if let Ok(mut latest) = latest.lock() {
+                    *latest = Some(text.clone());
+                }
+                unsaved = Some(text);
+            }
             other => batch.extend(UiEvent::from_output(other)),
         };
         take(first, &mut batch);
@@ -481,6 +529,7 @@ pub fn run() {
                 secrets: Secrets::new(&data_dir),
                 data_dir,
                 connection: Mutex::new(None),
+                latest_automation: Arc::new(Mutex::new(None)),
             });
             Ok(())
         })
@@ -490,6 +539,8 @@ pub fn run() {
             delete_profile,
             import_set,
             import_mm2,
+            get_automation,
+            set_automation,
             connect,
             send,
             disconnect

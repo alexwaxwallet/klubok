@@ -155,6 +155,16 @@ export function importMm2(id: string): Promise<MapImportResult | null> {
   return invoke("import_mm2", { id });
 }
 
+/** Настройки автоматизации профиля текстом JMC. */
+export function getAutomation(id: string): Promise<string> {
+  return invoke("get_automation", { id });
+}
+
+/** Сохранить настройки; у подключённого профиля они применяются сразу. */
+export function setAutomation(id: string, text: string): Promise<void> {
+  return invoke("set_automation", { id, text });
+}
+
 export function connect(id: string): Promise<void> {
   return invoke("connect", { id });
 }

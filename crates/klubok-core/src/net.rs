@@ -44,6 +44,10 @@ pub async fn run_session(
     let mut buf = vec![0u8; 16 * 1024];
     // Когда показать незаконченную строку, если сервер так ничего и не допишет.
     let mut flush_at: Option<Instant> = None;
+    // Время сессии считается от подключения; таймеры автоматизации — от него же.
+    let started = Instant::now();
+    session.set_now(Duration::ZERO);
+    let mut timers_at = session.next_deadline().map(|d| started + d);
 
     loop {
         // `select!` ждёт сразу несколько событий и обрабатывает то, что случилось первым.
@@ -65,13 +69,16 @@ pub async fn run_session(
                 None => break, // интерфейс закрылся
             },
             _ = sleep_until(flush_at) => SessionInput::FlushPartial,
+            _ = sleep_until(timers_at) => SessionInput::Timers,
         };
+        session.set_now(started.elapsed());
 
         let disconnected = matches!(input, SessionInput::Disconnected);
         let outputs = session.handle(input)?;
         flush_at = session
             .has_pending()
             .then(|| Instant::now() + PARTIAL_LINE_TIMEOUT);
+        timers_at = session.next_deadline().map(|d| started + d);
 
         let mut close = false;
         for output in outputs {

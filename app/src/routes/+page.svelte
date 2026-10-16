@@ -4,6 +4,7 @@
   import CommandInput from "$lib/CommandInput.svelte";
   import ProfileDialog from "$lib/ProfileDialog.svelte";
   import MapPanel from "$lib/MapPanel.svelte";
+  import AutomationEditor from "$lib/AutomationEditor.svelte";
   import { describeEvent, eventKeyName, normalizeSpec } from "$lib/hotkeys";
   import {
     connect,
@@ -50,6 +51,8 @@
   let selectedId = $state("");
   /** Открытый диалог профиля: undefined — закрыт, null — новый профиль. */
   let editing: ProfileInfo | null | undefined = $state(undefined);
+  /** Открыт редактор автоматизации выбранного профиля. */
+  let editingAutomation = $state(false);
   /** Горячие клавиши: каноническое имя (`Ctrl+NUM7`) → команды. */
   let hotkeys = new Map<string, string>();
   /** Режим #keytest: показывать, что пришло от каждой нажатой клавиши. */
@@ -215,7 +218,12 @@
       return;
     }
     if (!connected) {
-      note("error", "Нет подключения.");
+      // #connect / #con из JMC — подключиться выбранным профилем.
+      if (/^#con(n|ne|nec|nect)?\b/i.test(text.trim())) {
+        doConnect();
+        return;
+      }
+      note("error", "Нет подключения. Подключиться: кнопка вверху или #connect.");
       return;
     }
     // Пароль и «Имя Пароль» на входе уходят как есть: в пароле могут быть «;» и «#».
@@ -236,7 +244,7 @@
 
   /** Горячие клавиши проверяются до поля ввода, чтобы цифровой блок не печатал цифры. */
   function onKeydownCapture(event: KeyboardEvent) {
-    if (editing !== undefined) return;
+    if (editing !== undefined || editingAutomation) return;
     const name = eventKeyName(event);
     if (keytest && name !== null) {
       const bound = hotkeys.get(name);
@@ -271,9 +279,9 @@
 
   /** Любая буква, набранная вне поля ввода, уходит в поле ввода. */
   function onWindowKeydown(event: KeyboardEvent) {
-    if (editing !== undefined) return;
+    if (editing !== undefined || editingAutomation) return;
     const target = event.target as HTMLElement;
-    if (target.closest("input, select, button")) return;
+    if (target.closest("input, select, button, textarea")) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key.length === 1 || event.key === "Enter" || event.key.startsWith("Arrow")) {
       commandInput.focus();
@@ -328,6 +336,12 @@
         disabled={!selected}
         onclick={() => (editing = selected ?? null)}>⚙</button
       >
+      <button
+        class="icon"
+        title="Алиасы, триггеры, переменные, клавиши"
+        disabled={!selected}
+        onclick={() => (editingAutomation = true)}>ƒ</button
+      >
       <button class="icon" title="Новый профиль" onclick={() => (editing = null)}>＋</button>
       <button class="main" class:active={connected} onclick={() => (connected ? disconnect() : doConnect())}>
         {connected ? "Отключиться" : "Подключиться"}
@@ -367,6 +381,17 @@
     {/if}
   </main>
 </div>
+
+{#if editingAutomation && selected}
+  <AutomationEditor
+    profileId={selected.id}
+    profileName={selected.profile.name}
+    onclose={() => {
+      editingAutomation = false;
+      commandInput.focus();
+    }}
+  />
+{/if}
 
 {#if editing !== undefined}
   <ProfileDialog info={editing} {passwordStorage} onclose={closeDialog} />

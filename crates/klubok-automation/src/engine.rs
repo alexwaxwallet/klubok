@@ -5,18 +5,28 @@
 //! (что отправить, что показать). Сессия решает, что с этим делать.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use klubok_proto::StyledLine;
 
 use crate::color::{HighlightColor, parse_highlight};
 use crate::expr;
+use crate::js::{ScriptCall, ScriptEngine, ScriptSlot};
+use crate::merge::{MergeRule, Merger};
 use crate::pattern::Pattern;
 use crate::script::{
-    braced, parse_hash_command, split_commands, substitute_params, substitute_vars,
+    braced, hash_command_rest, parse_hash_command, split_commands, substitute_params,
+    substitute_vars,
+};
+use crate::timers::{
+    DECISECOND, DEFAULT_TICK_SIZE, MAX_TIMERS, ScriptTimer, TICK_TEXT, TICK_WARNING_TEXT,
+    TickEvent, Ticker, Timer, TimerKind, parse_loop_spec, parse_repeat, parse_seconds,
 };
 
 /// Насколько глубоко алиасы и триггеры могут вызывать друг друга (защита от зацикливания).
 const MAX_DEPTH: u8 = 16;
+/// Цикл без задержки (`#100 {…}`) выполняется сразу; больше повторов не делаем.
+const MAX_INSTANT_REPEATS: i64 = 10_000;
 pub const DEFAULT_GROUP: &str = "default";
 const DEFAULT_PRIORITY: i32 = 5;
 
@@ -35,7 +45,14 @@ pub enum Effect {
     Disconnect,
     /// Настройки изменились — их стоит сохранить.
     Changed,
+    /// Команда клиента вне автоматизации (карта: `#map`, `#go`) — её выполняет сессия.
+    /// Аргументы уже с подставленными переменными.
+    Client { name: String, args: Vec<String> },
 }
+
+/// Команды, которые автоматизация не выполняет сама, а передаёт сессии ([`Effect::Client`]).
+/// `connect` — `#connect адрес порт` (в JMC чаще пишут сокращённо: `#con localhost 2000`).
+pub const CLIENT_COMMANDS: &[&str] = &["map", "go", "stop", "connect"];
 
 #[derive(Debug, Clone)]
 pub struct Alias {
@@ -101,13 +118,44 @@ pub struct Automation {
     pub highlights: Vec<Highlight>,
     pub hotkeys: Vec<Hotkey>,
     pub substitutions: Vec<Substitution>,
+    /// Склейка строк (`#merge`).
+    pub merges: Vec<MergeRule>,
+    merger: Merger,
     /// Выключенные группы (`#group disable имя`).
     pub disabled_groups: BTreeSet<String>,
     /// Строки настроек, которые клиент пока не понимает, — сохраняются при записи.
     pub preserved: Vec<String>,
     /// О каких неподдерживаемых командах уже предупредили (чтобы не спамить).
     warned: BTreeSet<String>,
+    /// Тикер JMC (`#tickon`, `#tickset`, `#ticksize`).
+    pub ticker: Ticker,
+
+    // ── время ──
+    /// «Сейчас» — время от начала сессии, которое сообщила сессия (`set_now`/`tick`).
+    now: Duration,
+    /// Сессия сообщила, что соединения нет: тикер молчит, `jmc.isConnected` — false.
+    disconnected: bool,
+    /// Циклы с задержкой и `#delay` по номерам 0…15 (номер нужен для `#abort 3`).
+    timers: BTreeMap<usize, Timer>,
+    /// `#wait`: до этого момента обычные команды не отправляются, а копятся в очереди.
+    wait_until: Option<Duration>,
+    wait_queue: Vec<String>,
+
+    // ── скрипты ──
+    /// Движок JS для `#script` (создаётся при первом использовании).
+    scripts: ScriptSlot,
+    /// Таймеры скриптов (`jmc.setTimer`) по номерам.
+    script_timers: BTreeMap<i64, ScriptTimer>,
+    /// Обработчики событий скриптов (`jmc.registerHandler`): событие в нижнем регистре → код.
+    script_handlers: BTreeMap<String, String>,
 }
+
+// `Automation` передают в задачу tokio — он обязан оставаться `Send`.
+// Если это сломается, сборка упадёт здесь, а не где-то в сессии.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<Automation>();
+};
 
 /// Команды настроек JMC, которые при импорте просто сохраняются (на поведение пока не влияют).
 const SETTING_COMMANDS: &[&str] = &[
@@ -130,7 +178,6 @@ const SETTING_COMMANDS: &[&str] = &[
     "promptend",
     "codepage",
     "comment",
-    "ticksize",
     "secure",
 ];
 
@@ -141,6 +188,128 @@ impl Automation {
 
     fn enabled(&self, group: &str) -> bool {
         !self.disabled_groups.contains(group)
+    }
+
+    // ───────────────────────────── время ─────────────────────────────
+
+    /// Сообщает движку, который сейчас час: время от начала сессии (монотонное).
+    ///
+    /// Сессия вызывает это перед каждым `user_input`/`on_line`/`on_prompt`: команды вроде
+    /// `#5:10 {…}`, `#wait`, `#tickset` должны знать «сейчас», чтобы поставить таймер.
+    /// Почему не параметр каждого метода: так не меняются сигнатуры, которыми уже пользуется
+    /// сессия, а в тестах время задаётся одной строкой. Сам движок часов не читает —
+    /// поэтому тесты с выдуманным временем детерминированы.
+    pub fn set_now(&mut self, now: Duration) {
+        self.now = now;
+    }
+
+    /// Есть ли соединение с сервером. Без соединения тикер не показывает сообщений
+    /// (как в JMC), а `jmc.isConnected` в скриптах — `false`. По умолчанию — есть.
+    pub fn set_connected(&mut self, connected: bool) {
+        self.disconnected = !connected;
+    }
+
+    /// Ограничение времени одного `#script` (по умолчанию 1 с).
+    pub fn set_script_time_limit(&mut self, limit: Duration) {
+        self.scripts.time_limit = limit;
+    }
+
+    /// Выполняет всё, что созрело к моменту `now`: очередь `#wait`, циклы с задержкой,
+    /// `#delay`, таймеры скриптов, сообщения тикера. Когда звать в следующий раз —
+    /// [`Automation::next_deadline`].
+    pub fn tick(&mut self, now: Duration) -> Vec<Effect> {
+        self.set_now(now);
+        let mut fx = Vec::new();
+
+        if self.wait_until.is_some_and(|t| now >= t) {
+            self.wait_until = None;
+            self.flush_wait_queue(0, &mut fx);
+        }
+
+        // Номера по порядку; команда таймера может менять сами таймеры (`#abort all`),
+        // поэтому каждый раз ищем заново.
+        for id in 0..MAX_TIMERS {
+            let Some(timer) = self.timers.get_mut(&id) else {
+                continue;
+            };
+            if !timer.active || timer.next > now {
+                continue;
+            }
+            let (counter, done) = timer.fire(now);
+            let command = match timer.kind {
+                TimerKind::Cycle => timer.command.replace("%0", &counter.to_string()),
+                TimerKind::Delay => timer.command.clone(),
+            };
+            if done || timer.kind == TimerKind::Delay {
+                self.timers.remove(&id);
+            }
+            self.run(&command, 0, &mut fx);
+        }
+
+        let ids: Vec<i64> = self.script_timers.keys().copied().collect();
+        for id in ids {
+            let Some(timer) = self.script_timers.get_mut(&id) else {
+                continue;
+            };
+            if timer.due() <= now {
+                timer.last = now;
+                timer.pre_done = false;
+                self.fire_script_event("timer", id, &mut fx);
+            } else if timer.pre_due().is_some_and(|t| t <= now) {
+                timer.pre_done = true;
+                self.fire_script_event("pretimer", id, &mut fx);
+            }
+        }
+
+        // Счёт тиков идёт всегда, сообщения — только при соединении.
+        let event = self.ticker.poll(now);
+        if !self.disconnected {
+            let text = match event {
+                Some(TickEvent::Tick) => Some(TICK_TEXT),
+                Some(TickEvent::Warning) => Some(TICK_WARNING_TEXT),
+                None => None,
+            };
+            if let Some(text) = text {
+                // Как в JMC: сообщение тикера проходит через триггеры (`#action {#ТИК} {…}`).
+                fx.push(Effect::Echo(text.to_string()));
+                self.fire_actions(text, &mut fx);
+            }
+        }
+        dedup_changed(fx)
+    }
+
+    /// Когда в следующий раз вызвать [`Automation::tick`]; `None` — ждать нечего.
+    pub fn next_deadline(&self) -> Option<Duration> {
+        let timers = self.timers.values().filter(|t| t.active).map(|t| t.next);
+        let script_timers = self
+            .script_timers
+            .values()
+            .flat_map(|t| [Some(t.due()), t.pre_due()])
+            .flatten();
+        let ticker = if self.disconnected {
+            None
+        } else {
+            self.ticker.deadline()
+        };
+        timers
+            .chain(script_timers)
+            .chain(self.wait_until)
+            .chain(ticker)
+            .min()
+    }
+
+    /// Запускает обработчик события скрипта (`jmc.registerHandler("Timer", …)`).
+    fn fire_script_event(&mut self, event: &str, id: i64, fx: &mut Vec<Effect>) {
+        if let Some(code) = self.script_handlers.get(event).cloned() {
+            self.run_script(&code, vec![id.to_string()], 0, fx);
+        }
+    }
+
+    fn flush_wait_queue(&mut self, depth: u8, fx: &mut Vec<Effect>) {
+        // Команда из очереди может снова включить `#wait` — тогда остальные снова встанут в очередь.
+        for command in std::mem::take(&mut self.wait_queue) {
+            self.run(&command, depth, fx);
+        }
     }
 
     // ───────────────────────────── ввод игрока ─────────────────────────────
@@ -175,6 +344,12 @@ impl Automation {
     }
 
     fn plain_command(&mut self, command: &str, depth: u8, fx: &mut Vec<Effect>) {
+        if self.wait_until.is_some() {
+            // `#wait`: обычные команды (и алиасы) ждут; `#`-команды выполняются сразу.
+            self.wait_queue
+                .push(substitute_vars(command, &self.variables));
+            return;
+        }
         let (word, rest) = match command.split_once(char::is_whitespace) {
             Some((w, r)) => (w, r.trim()),
             None => (command, ""),
@@ -200,9 +375,98 @@ impl Automation {
         let Some((name, args)) = parse_hash_command(command) else {
             return;
         };
+        // Сокращения как в JMC: `#con` → `#connect`, `#script` → `#scriptlet`.
+        let name = canonical_command(&name);
         let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
+        let var_arg = |i: usize| substitute_vars(&arg(i), &self.variables);
 
         match name.as_str() {
+            "scriptlet" | "script" => {
+                // Как в JMC: весь остаток строки — код; `$переменные` подставляются до запуска.
+                let code = substitute_vars(hash_command_rest(command), &self.variables);
+                self.run_script(&code, Vec::new(), depth, fx);
+            }
+            "tick" => {
+                let text = if self.ticker.enabled {
+                    format!("#{} секунд до тика.", self.ticker.seconds_left(self.now))
+                } else {
+                    "#Тикер выключен".to_string()
+                };
+                fx.push(Effect::Echo(text));
+            }
+            "tickon" | "tickoff" => {
+                self.ticker.catch_up(self.now);
+                self.ticker.enabled = name == "tickon";
+                fx.push(Effect::Echo(
+                    if self.ticker.enabled {
+                        "#Тикер ВКЛЮЧЕН."
+                    } else {
+                        "#Тикер ВЫКЛЮЧЕН."
+                    }
+                    .to_string(),
+                ));
+                fx.push(Effect::Changed);
+            }
+            "tickset" => self.ticker.reset(self.now),
+            "ticksize" => match var_arg(0).trim().parse::<u64>() {
+                Ok(secs) if secs > 0 => {
+                    self.ticker.size = Duration::from_secs(secs);
+                    self.ticker.reset(self.now);
+                    fx.push(Effect::Echo(
+                        "#Установлена новая длительность тика.".to_string(),
+                    ));
+                    fx.push(Effect::Changed);
+                }
+                _ => fx.push(Effect::Echo(
+                    "#Пожалуйста, укажите длительность тика в секундах.".to_string(),
+                )),
+            },
+            "wait" | "wt" => self.wait_command(var_arg(0).trim(), depth, fx),
+            "delay" => match parse_seconds(&var_arg(0)) {
+                Some(delay) if args.len() >= 2 => {
+                    self.add_timer(
+                        Timer {
+                            kind: TimerKind::Delay,
+                            command: arg(1),
+                            counter: 1,
+                            end: 1,
+                            step: 1,
+                            period: Duration::ZERO,
+                            next: self.now + delay,
+                            active: true,
+                        },
+                        fx,
+                    );
+                }
+                _ => fx.push(Effect::Warning(
+                    "#delay {секунды} {команды}: не понял задержку".to_string(),
+                )),
+            },
+            "loop" => match parse_loop_spec(&var_arg(0)) {
+                Some((from, to, step, delay)) => {
+                    self.start_cycle(from, to, step, delay, &arg(1), depth, fx)
+                }
+                None => fx.push(Effect::Warning(format!(
+                    "#loop {{{}}}: нужно «от,до[|шаг][:задержка]»",
+                    arg(0)
+                ))),
+            },
+            "break" | "abort" | "resume" | "pinch" => self.timer_control(&name, &var_arg(0)),
+            "tmlist" | "llist" => fx.push(Effect::Echo(self.list_timers())),
+            _ if name.starts_with(|c: char| c.is_ascii_digit()) => match parse_repeat(&name) {
+                // `#5 {см}` — пять раз сразу; `#5:10 {см}` — пять раз, раз в секунду.
+                Some((count, delay)) => {
+                    let body = if args.len() == 1 {
+                        arg(0)
+                    } else {
+                        hash_command_rest(command).trim().to_string()
+                    };
+                    self.start_cycle(1, count, 1, delay, &body, depth, fx);
+                }
+                None => fx.push(Effect::Warning(format!(
+                    "#{name}: нужно «#число {{команды}}» или «#число:задержка {{команды}}»"
+                ))),
+            },
             "alias" | "ali" | "al" => match args.len() {
                 0 => fx.push(Effect::Echo(self.list_aliases(None))),
                 1 => fx.push(Effect::Echo(self.list_aliases(Some(&args[0])))),
@@ -286,6 +550,18 @@ impl Automation {
                 self.set_substitution(&arg(0), None, args.get(1));
                 fx.push(Effect::Changed);
             }
+            "merge" => {
+                if args.len() < 2 {
+                    fx.push(Effect::Echo(self.list_merges()));
+                } else {
+                    self.set_merge(&args[0], &args[1], args.get(2), args.get(3));
+                    fx.push(Effect::Changed);
+                }
+            }
+            "unmerge" => {
+                self.merges.retain(|m| m.start.source != arg(0));
+                fx.push(Effect::Changed);
+            }
             "substitute" | "sub" | "subs" => {
                 if args.len() < 2 {
                     fx.push(Effect::Echo(self.list_substitutions()));
@@ -343,11 +619,248 @@ impl Automation {
             }
             "bell" => fx.push(Effect::Bell),
             "zap" => fx.push(Effect::Disconnect),
+            _ if CLIENT_COMMANDS.contains(&name.as_str()) => fx.push(Effect::Client {
+                args: args
+                    .iter()
+                    .map(|a| substitute_vars(a, &self.variables))
+                    .collect(),
+                name,
+            }),
             _ if SETTING_COMMANDS.contains(&name.as_str()) => {}
             _ => {
                 if self.warned.insert(name.clone()) {
                     fx.push(Effect::Warning(format!(
                         "команда #{name} пока не поддерживается (пропущена)"
+                    )));
+                }
+            }
+        }
+    }
+
+    // ───────────────────────────── таймеры ─────────────────────────────
+
+    /// `#wait N` (десятые секунды) / `#wait cancel` / `#wait 0` — как в JMC.
+    fn wait_command(&mut self, arg: &str, depth: u8, fx: &mut Vec<Effect>) {
+        if !arg.is_empty() && "cancel".starts_with(&arg.to_lowercase()) {
+            self.wait_queue.clear();
+            self.wait_until = None;
+            return;
+        }
+        if arg.starts_with(|c: char| c.is_ascii_digit()) {
+            let tenths: u64 = arg
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0);
+            self.wait_until = (tenths > 0).then(|| self.now + DECISECOND * tenths as u32);
+        }
+        if self.wait_until.is_none() {
+            self.flush_wait_queue(depth, fx);
+        }
+    }
+
+    /// Цикл JMC: `command` выполняется для счётчика от `from` до `to` с шагом `step`
+    /// (`%0` — значение счётчика). Без задержки — сразу, с задержкой — по таймеру.
+    #[allow(clippy::too_many_arguments)]
+    fn start_cycle(
+        &mut self,
+        from: i64,
+        to: i64,
+        step: i64,
+        delay_tenths: u64,
+        command: &str,
+        depth: u8,
+        fx: &mut Vec<Effect>,
+    ) {
+        let step = step.max(1);
+        if delay_tenths == 0 {
+            let mut counter = from;
+            for _ in 0..MAX_INSTANT_REPEATS {
+                self.run(&command.replace("%0", &counter.to_string()), depth + 1, fx);
+                if from <= to {
+                    counter += step;
+                    if counter > to {
+                        return;
+                    }
+                } else {
+                    counter -= step;
+                    if counter < to {
+                        return;
+                    }
+                }
+            }
+            fx.push(Effect::Warning(format!(
+                "цикл остановлен после {MAX_INSTANT_REPEATS} повторов"
+            )));
+            return;
+        }
+        let period = DECISECOND * u32::try_from(delay_tenths).unwrap_or(u32::MAX);
+        self.add_timer(
+            Timer {
+                kind: TimerKind::Cycle,
+                command: command.to_string(),
+                counter: from,
+                end: to,
+                step,
+                period,
+                // Как в JMC: первый раз — на ближайшей десятой доли секунды, дальше — раз в период.
+                next: self.now + DECISECOND,
+                active: true,
+            },
+            fx,
+        );
+    }
+
+    fn add_timer(&mut self, timer: Timer, fx: &mut Vec<Effect>) {
+        match (0..MAX_TIMERS).find(|id| !self.timers.contains_key(id)) {
+            Some(id) => {
+                self.timers.insert(id, timer);
+            }
+            None => fx.push(Effect::Warning(format!(
+                "все {MAX_TIMERS} таймеров заняты — «{}» не запущен (#tmlist, #abort)",
+                timer.command
+            ))),
+        }
+    }
+
+    /// `#abort {номер|all}` — убрать; `#break` — приостановить (повторно — убрать);
+    /// `#resume` (`#pinch`) — продолжить приостановленный.
+    fn timer_control(&mut self, command: &str, target: &str) {
+        let target = target.trim();
+        let ids: Vec<usize> = if target.eq_ignore_ascii_case("all") {
+            self.timers.keys().copied().collect()
+        } else {
+            target.parse().ok().into_iter().collect()
+        };
+        for id in ids {
+            let Some(timer) = self.timers.get_mut(&id) else {
+                continue;
+            };
+            match command {
+                "abort" => {
+                    self.timers.remove(&id);
+                }
+                "break" if timer.active => timer.active = false,
+                "break" => {
+                    self.timers.remove(&id);
+                }
+                _ => timer.active = true,
+            }
+        }
+    }
+
+    fn list_timers(&self) -> String {
+        let items = self
+            .timers
+            .iter()
+            .map(|(id, t)| {
+                let next = t.next.saturating_sub(self.now).as_secs_f64();
+                let state = if t.active { "" } else { ", остановлен" };
+                match t.kind {
+                    TimerKind::Cycle => format!(
+                        "#{id}: {{{}}} — осталось {} раз, каждые {:.1} с, следующий через {next:.1} с{state}",
+                        t.command,
+                        t.remaining(),
+                        t.period.as_secs_f64()
+                    ),
+                    TimerKind::Delay => {
+                        format!("#{id}: {{{}}} — через {next:.1} с{state}", t.command)
+                    }
+                }
+            })
+            .collect();
+        listing("Таймеры", items)
+    }
+
+    // ───────────────────────────── скрипты ─────────────────────────────
+
+    /// Выполняет JS-код `#script` и затем — то, что он попросил (`jmc.parse` и т.п.).
+    fn run_script(&mut self, code: &str, event: Vec<String>, depth: u8, fx: &mut Vec<Effect>) {
+        if self.scripts.engine.is_none() {
+            match ScriptEngine::new() {
+                Ok(engine) => self.scripts.engine = Some(engine),
+                Err(e) => {
+                    fx.push(Effect::Warning(format!(
+                        "#script: не удалось запустить JavaScript: {e}"
+                    )));
+                    return;
+                }
+            }
+        }
+        let limit = self.scripts.time_limit;
+        let connected = !self.disconnected;
+        let Some(engine) = self.scripts.engine.as_mut() else {
+            return;
+        };
+        let result = engine.run(code, &self.variables, event, connected, limit);
+        for call in result.calls {
+            self.script_call(call, depth, fx);
+        }
+        if result.dropped > 0 {
+            fx.push(Effect::Warning(format!(
+                "#script: слишком много вызовов jmc за один раз, {} пропущено",
+                result.dropped
+            )));
+        }
+        if let Some(error) = result.error {
+            fx.push(Effect::Warning(format!("#script: {error}")));
+        }
+    }
+
+    fn script_call(&mut self, call: ScriptCall, depth: u8, fx: &mut Vec<Effect>) {
+        match call {
+            // Через `run` — значит, работают алиасы, `#`-команды и защита от рекурсии.
+            ScriptCall::Parse(command) => self.run(&command, depth + 1, fx),
+            ScriptCall::Send(line) => fx.push(Effect::Send(line)),
+            ScriptCall::Echo(text) => fx.push(Effect::Echo(text)),
+            ScriptCall::Bell => fx.push(Effect::Bell),
+            ScriptCall::SetVar(name, value) => self.set_variable(&name, &value, fx),
+            ScriptCall::Connect(address, port) => fx.push(Effect::Client {
+                name: "connect".to_string(),
+                args: vec![address, port],
+            }),
+            ScriptCall::Disconnect => fx.push(Effect::Disconnect),
+            ScriptCall::SetTimer { id, interval, pre } => {
+                let tenths = |n: i64| DECISECOND * u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+                self.script_timers.insert(
+                    id,
+                    ScriptTimer {
+                        id,
+                        interval: tenths(interval).max(DECISECOND),
+                        pre: tenths(pre),
+                        last: self.now,
+                        pre_done: false,
+                    },
+                );
+            }
+            ScriptCall::KillTimer(id) => {
+                self.script_timers.remove(&id);
+            }
+            ScriptCall::RegisterHandler(event, code) => {
+                let event = event.to_lowercase();
+                if !matches!(event.as_str(), "timer" | "pretimer")
+                    && self.warned.insert(format!("event {event}"))
+                {
+                    fx.push(Effect::Warning(format!(
+                        "jmc.registerHandler: событие «{event}» пока не поддерживается \
+                         (работают Timer и PreTimer)"
+                    )));
+                }
+                if code.trim().is_empty() {
+                    self.script_handlers.remove(&event);
+                } else {
+                    self.script_handlers.insert(event, code);
+                }
+            }
+            ScriptCall::SetHotkey(key, command) => {
+                self.set_hotkey(&key, &command, None);
+                fx.push(Effect::Changed);
+            }
+            ScriptCall::Unsupported(method) => {
+                if self.warned.insert(format!("jmc.{method}")) {
+                    fx.push(Effect::Warning(format!(
+                        "jmc.{method} пока не поддерживается (пропущено)"
                     )));
                 }
             }
@@ -469,6 +982,58 @@ impl Automation {
 
     // ───────────────────────────── строки от сервера ─────────────────────────────
 
+    /// Склейка (`#merge`): строка от сервера → строки, которые пора обрабатывать дальше
+    /// (`on_line`). Пока склейка не закончилась, возвращает пустой список.
+    pub fn merge_line(&mut self, line: StyledLine) -> Vec<StyledLine> {
+        if self.merges.is_empty() && !self.merger.is_open() {
+            return vec![line];
+        }
+        let disabled = &self.disabled_groups;
+        self.merger
+            .line(&mut self.merges, line, &self.variables, |g| {
+                !disabled.contains(g)
+            })
+    }
+
+    /// Промпт или разрыв: незаконченная склейка показывается как есть.
+    pub fn merge_flush(&mut self) -> Option<StyledLine> {
+        self.merger.flush()
+    }
+
+    fn set_merge(
+        &mut self,
+        start: &str,
+        end: &str,
+        separator: Option<&String>,
+        group: Option<&String>,
+    ) {
+        let group = group.cloned().unwrap_or_else(|| DEFAULT_GROUP.to_string());
+        let separator = separator.cloned().unwrap_or_else(|| " ".to_string());
+        let rule = MergeRule::new(start, end, &separator, &group);
+        match self.merges.iter_mut().find(|m| m.start.source == start) {
+            Some(existing) => *existing = rule,
+            None => self.merges.push(rule),
+        }
+    }
+
+    fn list_merges(&self) -> String {
+        let items: Vec<String> = self
+            .merges
+            .iter()
+            .map(|m| {
+                format!(
+                    "#merge {{{}}} {{{}}} {{{}}}",
+                    m.start.source, m.end_source, m.separator
+                )
+            })
+            .collect();
+        if items.is_empty() {
+            "Склеек нет. #merge {начало} {конец или число строк} {разделитель}".to_string()
+        } else {
+            items.join("\n")
+        }
+    }
+
     /// Обрабатывает строку от сервера: замены и скрытие, триггеры, подсветка.
     /// Возвращает `false`, если строку нужно скрыть. Триггеры срабатывают и на скрытых строках.
     pub fn on_line(&mut self, line: &mut StyledLine, fx: &mut Vec<Effect>) -> bool {
@@ -565,8 +1130,16 @@ impl Automation {
                 self.preserved.push(line.to_string());
                 continue;
             };
+            let name = canonical_command(&name);
             let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
             match name.as_str() {
+                "ticksize" if arg(0).trim().parse::<u64>().is_ok_and(|n| n > 0) => {
+                    let secs = arg(0).trim().parse().unwrap_or(60);
+                    self.ticker.size = Duration::from_secs(secs);
+                    self.ticker.reset(self.now);
+                }
+                "tickon" => self.ticker.enabled = true,
+                "tickoff" => self.ticker.enabled = false,
                 "alias" | "ali" | "al" if args.len() >= 2 => {
                     self.set_alias(&args[0], &args[1], args.get(2));
                     report.aliases += 1;
@@ -612,6 +1185,10 @@ impl Automation {
                     self.set_substitution(&args[0], Some(&args[1]), args.get(2));
                     report.substitutions += 1;
                 }
+                "merge" if args.len() >= 2 => {
+                    self.set_merge(&args[0], &args[1], args.get(2), args.get(3));
+                    report.substitutions += 1;
+                }
                 "group" if matches!(arg(0).to_lowercase().as_str(), "disable" | "off") => {
                     self.disabled_groups.insert(arg(1));
                 }
@@ -653,6 +1230,12 @@ impl Automation {
             out.push_str(&s);
             out.push('\n');
         };
+        if self.ticker.size != DEFAULT_TICK_SIZE {
+            line(format!("#ticksize {}", self.ticker.size.as_secs()));
+        }
+        if self.ticker.enabled {
+            line("#tickon".to_string());
+        }
         for (name, value) in &self.variables {
             line(format!("#variable {} {}", braced(name), braced(value)));
         }
@@ -704,6 +1287,15 @@ impl Automation {
                     braced(&s.group)
                 )),
             }
+        }
+        for m in &self.merges {
+            line(format!(
+                "#merge {} {} {} {}",
+                braced(&m.start.source),
+                braced(&m.end_source),
+                braced(&m.separator),
+                braced(&m.group)
+            ));
         }
         for g in &self.disabled_groups {
             line(format!("#group disable {}", braced(g)));
@@ -814,59 +1406,235 @@ fn split_action_kind(args: &[String]) -> (String, &[String]) {
     }
 }
 
+/// Команды, которые выполняет сам движок (полные имена и принятые у нас сокращения).
+const SUPPORTED: &[&str] = &[
+    "merge",
+    "unmerge",
+    "alias",
+    "ali",
+    "al",
+    "unalias",
+    "unali",
+    "action",
+    "act",
+    "ac",
+    "unaction",
+    "unact",
+    "unac",
+    "variable",
+    "var",
+    "unvariable",
+    "unvar",
+    "highlight",
+    "high",
+    "unhighlight",
+    "unhigh",
+    "hot",
+    "hotkey",
+    "unhot",
+    "unhotkey",
+    "gag",
+    "ungag",
+    "substitute",
+    "sub",
+    "subs",
+    "unsubstitute",
+    "unsub",
+    "unsubs",
+    "if",
+    "math",
+    "group",
+    "output",
+    "showme",
+    "woutput",
+    "bell",
+    "zap",
+    // скрипты
+    "scriptlet",
+    "script",
+    // время
+    "tick",
+    "tickon",
+    "tickoff",
+    "tickset",
+    "ticksize",
+    "wait",
+    "wt",
+    "delay",
+    "loop",
+    "break",
+    "abort",
+    "resume",
+    "pinch",
+    "tmlist",
+    "llist",
+];
+
+/// Все команды JMC 3.6 в порядке из его `cmds.h`. В JMC команду можно сокращать:
+/// сокращение означает **первую** команду списка, которая с него начинается
+/// (`#con` → `#connect`, `#script` → `#scriptlet`, `#t` → `#tolower`).
+const JMC_COMMANDS: &[&str] = &[
+    "variable",
+    "action",
+    "alias",
+    "read",
+    "if",
+    "group",
+    "loop",
+    "tolower",
+    "toupper",
+    "antisubstitute",
+    "drop",
+    "nodrop",
+    "cr",
+    "echo",
+    "highlight",
+    "ignore",
+    "info",
+    "killall",
+    "kickall",
+    "log",
+    "map",
+    "mark",
+    "math",
+    "message",
+    "output",
+    "path",
+    "pathdir",
+    "presub",
+    "return",
+    "scriptlet",
+    "savepath",
+    "showme",
+    "speedwalk",
+    "textin",
+    "substitute",
+    "gag",
+    "tick",
+    "tickon",
+    "tickoff",
+    "tickset",
+    "ticksize",
+    "togglesubs",
+    "unaction",
+    "unalias",
+    "unantisubstitute",
+    "unpath",
+    "unvar",
+    "write",
+    "zap",
+    "hotkey",
+    "unhotkey",
+    "connect",
+    "bell",
+    "char",
+    "status",
+    "tabadd",
+    "tabdel",
+    "multiaction",
+    "multisubstitute",
+    "multihighlight",
+    "verbatim",
+    "nope",
+    "quit",
+    "hidewindow",
+    "restorewindow",
+    "tray",
+    "reloadscripts",
+    "use",
+    "unuse",
+    "systemexec",
+    "ps",
+    "tslist",
+    "terminate",
+    "tskill",
+    "play",
+    "woutput",
+    "wdock",
+    "wshow",
+    "wpos",
+    "wlog",
+    "wname",
+    "logadd",
+    "logpass",
+    "flash",
+    "next",
+    "daa",
+    "whisper",
+    "hide",
+    "race",
+    "spit",
+    "stick",
+    "lick",
+    "feed",
+    "colon",
+    "wait",
+    "wt",
+    "break",
+    "abort",
+    "pinch",
+    "resume",
+    "tmlist",
+    "llist",
+    "unsubstitute",
+    "comment",
+    "sos",
+    "grab",
+    "help",
+    "clean",
+    "prefix",
+    "winamp",
+    "wamp",
+    "autoreconnect",
+    "run",
+    "clear",
+    "wclear",
+    "loopback",
+    "broadcast",
+    "strcmp",
+    "match",
+    "srandom",
+    "random",
+    "sync",
+    "proxy",
+    "telnet",
+    "promptend",
+    "wsize",
+    "replace",
+    "secure",
+    "codepage",
+    "bar",
+    "oob",
+    "mapper",
+];
+
+/// Имя, которое движок знает как есть (без разворачивания сокращений).
+fn is_known_command(name: &str) -> bool {
+    SUPPORTED.contains(&name) || SETTING_COMMANDS.contains(&name) || CLIENT_COMMANDS.contains(&name)
+}
+
+/// Полное имя команды: известные имена — как есть, иначе сокращение по правилам JMC.
+/// `#5:10` (цикл) и неизвестное — как есть.
+fn canonical_command(name: &str) -> String {
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || is_known_command(name) {
+        return name.to_string();
+    }
+    JMC_COMMANDS
+        .iter()
+        .find(|full| full.starts_with(name))
+        .map(|full| full.to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
 /// Имена `#`-команд внутри тела, которые клиент пока не выполняет.
 fn inner_unsupported(body: &str) -> Vec<String> {
-    const SUPPORTED: &[&str] = &[
-        "alias",
-        "ali",
-        "al",
-        "unalias",
-        "unali",
-        "action",
-        "act",
-        "ac",
-        "unaction",
-        "unact",
-        "unac",
-        "variable",
-        "var",
-        "unvariable",
-        "unvar",
-        "highlight",
-        "high",
-        "unhighlight",
-        "unhigh",
-        "hot",
-        "hotkey",
-        "unhot",
-        "unhotkey",
-        "gag",
-        "ungag",
-        "substitute",
-        "sub",
-        "subs",
-        "unsubstitute",
-        "unsub",
-        "unsubs",
-        "if",
-        "math",
-        "group",
-        "output",
-        "showme",
-        "woutput",
-        "bell",
-        "zap",
-    ];
     let mut found = Vec::new();
     let mut rest = body;
     while let Some(i) = rest.find('#') {
         rest = &rest[i + 1..];
         let name: String = rest.chars().take_while(|c| c.is_alphabetic()).collect();
         let lower = name.to_lowercase();
-        if !lower.is_empty()
-            && !SUPPORTED.contains(&lower.as_str())
-            && !SETTING_COMMANDS.contains(&lower.as_str())
-        {
+        if !lower.is_empty() && !is_known_command(&canonical_command(&lower)) {
             found.push(lower);
         }
     }
@@ -1034,13 +1802,269 @@ mod tests {
     #[test]
     fn неподдерживаемое_внутри_тел() {
         let mut a = Automation::new();
-        let report = a.import("#alias {x} {#script if (1) {jmc.parse(\"см\")}; см} {default}");
-        assert_eq!(report.unsupported.get("#script (внутри)"), Some(&1));
+        let report = a.import(
+            "#alias {x} {#tolower a b; #script jmc.parse(\"см\"); #con localhost 2000} {default}",
+        );
+        assert_eq!(report.unsupported.get("#tolower (внутри)"), Some(&1));
+        assert!(!report.unsupported.contains_key("#script (внутри)"));
+        assert!(!report.unsupported.contains_key("#con (внутри)"));
         let fx = a.user_input("x");
         assert_eq!(sends(&fx), ["см"]);
+        assert!(fx.contains(&Effect::Client {
+            name: "connect".into(),
+            args: vec!["localhost".into(), "2000".into()],
+        }));
         assert!(
             fx.iter()
-                .any(|e| matches!(e, Effect::Warning(w) if w.contains("#script")))
+                .any(|e| matches!(e, Effect::Warning(w) if w.contains("#tolower")))
         );
+    }
+
+    fn echoes(fx: &[Effect]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Echo(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn warnings(fx: &[Effect]) -> Vec<String> {
+        fx.iter()
+            .filter_map(|e| match e {
+                Effect::Warning(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    // ───────────── скрипты ─────────────
+
+    #[test]
+    fn скрипт_if_else_на_переменных() {
+        let mut a = Automation::new();
+        a.import(
+            "#variable {ch11} {щит}\n#variable {ch12} {0}\n\
+             #alias {одеть} {#script if (\"$ch11\" != \"0\") {jmc.parse(\"оде $ch11; дер $ch11\")} else {jmc.showme(\"нет\")}; \
+             #script if (\"$ch12\" != \"0\") {jmc.parse(\"оде $ch12\")} else {jmc.showme(\"пусто\")}} {default}",
+        );
+        let fx = a.user_input("одеть");
+        assert_eq!(sends(&fx), ["оде щит", "дер щит"]);
+        assert_eq!(echoes(&fx), ["пусто"]);
+        assert!(warnings(&fx).is_empty(), "{fx:?}");
+    }
+
+    #[test]
+    fn jmc_parse_с_алиасом_и_командами() {
+        let mut a = Automation::new();
+        a.user_input("#alias {вз} {взять %1 сумка}");
+        let fx = a.user_input("#script {jmc.parse('вз меч; #var x 5'); jmc.send('вз как есть')}");
+        assert_eq!(sends(&fx), ["взять меч сумка", "вз как есть"]);
+        assert_eq!(a.variables["x"], "5");
+        assert_eq!(fx.last(), Some(&Effect::Changed));
+        // jmc.getVar видит переменные клиента, jmc.setVar их меняет.
+        let fx = a.user_input(
+            "#script {jmc.setVar('y', jmc.getVar('x') * 2); jmc.showme(jmc.GetVar('y'))}",
+        );
+        assert_eq!(echoes(&fx), ["10"]);
+        assert_eq!(a.variables["y"], "10");
+    }
+
+    #[test]
+    fn глобальные_переменные_js_живут_между_вызовами() {
+        let mut a = Automation::new();
+        a.user_input("#script {n = 1; var m = 10}");
+        let fx = a.user_input("#script {n = n + 1; jmc.showme('n=' + n + ', m=' + m)}");
+        assert_eq!(echoes(&fx), ["n=2, m=10"]);
+        // Клон получает свой, новый движок.
+        let mut b = a.clone();
+        let fx = b.user_input("#script jmc.showme(typeof n)");
+        assert_eq!(echoes(&fx), ["undefined"]);
+    }
+
+    #[test]
+    fn вечный_цикл_прерывается() {
+        let mut a = Automation::new();
+        a.set_script_time_limit(ms(50));
+        let fx = a.user_input("#script {jmc.send('до'); while (true) { jmc.parse('спам') }}");
+        let w = warnings(&fx);
+        assert!(w.iter().any(|w| w.contains("прерван")), "{w:?}");
+        assert!(w.iter().any(|w| w.contains("слишком много")), "{w:?}");
+        assert_eq!(sends(&fx)[0], "до");
+        // Движок после прерывания жив.
+        assert_eq!(sends(&a.user_input("#script jmc.send('жив')")), ["жив"]);
+    }
+
+    #[test]
+    fn ошибка_синтаксиса_предупреждение() {
+        let mut a = Automation::new();
+        let fx = a.user_input("#script if ( {jmc.send('x')}; см");
+        assert_eq!(sends(&fx), ["см"]);
+        let w = warnings(&fx);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("#script: SyntaxError"), "{w:?}");
+        let fx = a.user_input("#script нет_такого()");
+        assert!(warnings(&fx)[0].contains("ReferenceError"));
+    }
+
+    #[test]
+    fn рекурсия_через_скрипт_останавливается() {
+        let mut a = Automation::new();
+        a.user_input("#alias {р} {#script jmc.parse('р')}");
+        let fx = a.user_input("р");
+        assert!(
+            warnings(&fx)
+                .iter()
+                .any(|w| w.contains("слишком глубокая вложенность"))
+        );
+    }
+
+    #[test]
+    fn таймер_скрипта() {
+        let mut a = Automation::new();
+        a.set_now(ms(1000));
+        a.user_input(
+            "#script {jmc.registerHandler('Timer', \"jmc.send('таймер ' + jmc.event(0))\"); jmc.setTimer(7, 20)}",
+        );
+        assert_eq!(a.next_deadline(), Some(ms(3000)));
+        assert!(a.tick(ms(2999)).is_empty());
+        assert_eq!(sends(&a.tick(ms(3000))), ["таймер 7"]);
+        a.user_input("#script jmc.killTimer(7)");
+        assert_eq!(a.next_deadline(), None);
+    }
+
+    // ───────────── время ─────────────
+
+    #[test]
+    fn цикл_с_задержкой() {
+        let mut a = Automation::new();
+        a.set_now(ms(0));
+        assert!(sends(&a.user_input("#3:10 {гг %0}")).is_empty());
+        assert_eq!(a.next_deadline(), Some(ms(100)));
+        assert_eq!(sends(&a.tick(ms(100))), ["гг 1"]);
+        assert_eq!(a.next_deadline(), Some(ms(1100)));
+        assert!(a.tick(ms(1000)).is_empty());
+        assert_eq!(sends(&a.tick(ms(1100))), ["гг 2"]);
+        assert_eq!(sends(&a.tick(ms(2100))), ["гг 3"]);
+        assert_eq!(a.next_deadline(), None);
+    }
+
+    #[test]
+    fn цикл_без_задержки_и_loop() {
+        let mut a = Automation::new();
+        assert_eq!(sends(&a.user_input("#3 {см}")), ["см", "см", "см"]);
+        assert_eq!(
+            sends(&a.user_input("#loop {3,1} {гг %0}")),
+            ["гг 3", "гг 2", "гг 1"]
+        );
+        a.set_now(ms(0));
+        a.user_input("#loop {1,4|2:5} {гг %0}");
+        assert_eq!(sends(&a.tick(ms(100))), ["гг 1"]);
+        assert_eq!(sends(&a.tick(ms(600))), ["гг 3"]);
+        assert_eq!(a.next_deadline(), None);
+    }
+
+    #[test]
+    fn abort_break_resume() {
+        let mut a = Automation::new();
+        a.set_now(ms(0));
+        // Как у владельца: длинный цикл, который останавливает триггер.
+        a.user_input("#3000:15 {г да}");
+        a.user_input("#action {^Вы убили} {#abort all; #bell}");
+        a.user_input("#5:10 {см}");
+        let list = echoes(&a.user_input("#tmlist")).join("\n");
+        assert!(
+            list.contains("#0: {г да}") && list.contains("#1: {см}"),
+            "{list}"
+        );
+        assert_eq!(sends(&a.tick(ms(100))), ["г да", "см"]);
+
+        a.user_input("#break 1");
+        assert_eq!(sends(&a.tick(ms(1600))), ["г да"]);
+        a.user_input("#resume 1");
+        assert_eq!(sends(&a.tick(ms(1700))), ["см"]);
+
+        let (_, _, fx) = line_fx(&mut a, "Вы убили бобра.");
+        assert!(fx.contains(&Effect::Bell));
+        assert_eq!(a.next_deadline(), None);
+        assert!(a.tick(ms(5000)).is_empty());
+    }
+
+    #[test]
+    fn wait_и_delay() {
+        let mut a = Automation::new();
+        a.set_now(ms(0));
+        let fx = a.user_input("#wait 20; север; #output привет; юг");
+        assert!(sends(&fx).is_empty());
+        assert_eq!(echoes(&fx), ["привет"]);
+        assert_eq!(a.next_deadline(), Some(ms(2000)));
+        assert!(a.tick(ms(1999)).is_empty());
+        assert_eq!(sends(&a.tick(ms(2000))), ["север", "юг"]);
+
+        a.user_input("#wt 5; запад");
+        a.user_input("#wait cancel");
+        assert_eq!(a.next_deadline(), None);
+        assert_eq!(sends(&a.user_input("восток")), ["восток"]);
+
+        a.user_input("#delay {1,5} {см}");
+        assert_eq!(a.next_deadline(), Some(ms(3500))); // «сейчас» — 2 с после tick
+        assert_eq!(sends(&a.tick(ms(3500))), ["см"]);
+        assert_eq!(a.next_deadline(), None);
+    }
+
+    #[test]
+    fn тикер_и_триггер_на_тик() {
+        let mut a = Automation::new();
+        a.set_now(ms(0));
+        a.user_input("#action {^#ТИК} {гг тик}");
+        a.user_input("#action {Минул час.} {#tickset}");
+        assert_eq!(a.next_deadline(), None); // тикер выключен
+        assert_eq!(echoes(&a.user_input("#tickon")), ["#Тикер ВКЛЮЧЕН."]);
+
+        a.set_now(ms(3000));
+        line_fx(&mut a, "Минул час.");
+        assert_eq!(a.next_deadline(), Some(ms(53_000)));
+        let fx = a.tick(ms(53_000));
+        assert_eq!(echoes(&fx), ["#10 СЕКУНД ДО ТИКА"]);
+        a.set_now(ms(60_000));
+        assert_eq!(echoes(&a.user_input("#tick")), ["#3 секунд до тика."]);
+        let fx = a.tick(ms(63_000));
+        assert_eq!(echoes(&fx), ["#ТИК"]);
+        assert_eq!(sends(&fx), ["гг тик"]);
+
+        a.set_connected(false);
+        assert_eq!(a.next_deadline(), None);
+        a.set_connected(true);
+        assert_eq!(echoes(&a.user_input("#ticksize 30")).len(), 1);
+        // «сейчас» — 63 с: тик в 93 с, предупреждение в 83 с.
+        assert_eq!(a.next_deadline(), Some(ms(83_000)));
+    }
+
+    #[test]
+    fn тикер_в_настройках() {
+        let mut a = Automation::new();
+        a.import("#ticksize 30\n#tickon\n#tickset");
+        assert_eq!(a.ticker.size, Duration::from_secs(30));
+        assert!(a.ticker.enabled);
+        let script = a.to_script();
+        assert!(script.contains("#ticksize 30\n#tickon\n"), "{script}");
+        let mut b = Automation::new();
+        b.import("#ticksize 60");
+        assert!(!b.to_script().contains("ticksize"));
+    }
+
+    #[test]
+    fn сокращения_команд_как_в_jmc() {
+        assert_eq!(canonical_command("con"), "connect");
+        assert_eq!(canonical_command("script"), "script");
+        assert_eq!(canonical_command("scr"), "scriptlet");
+        assert_eq!(canonical_command("ab"), "abort");
+        assert_eq!(canonical_command("ali"), "ali");
+        assert_eq!(canonical_command("3000:15"), "3000:15");
+        assert_eq!(canonical_command("нет"), "нет");
     }
 }

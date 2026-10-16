@@ -9,7 +9,14 @@ repository.workspace = true
 [dependencies]
 klubok-proto.workspace = true
 regex = "1.13.1"
+# JavaScript для `#script` (движок QuickJS на C). `parallel` — чтобы `Automation` был `Send`.
+rquickjs = { version = "0.14.0", features = ["parallel"] }
 serde = { version = "1.0.229", features = ["derive"] }
+
+# Для Android у rquickjs нет готовых привязок к C — их сгенерирует bindgen
+# (нужен libclang, он есть в Android NDK).
+[target.'cfg(target_os = "android")'.dependencies]
+rquickjs = { version = "0.14.0", features = ["parallel", "bindgen"] }
 
 [lints]
 workspace = true

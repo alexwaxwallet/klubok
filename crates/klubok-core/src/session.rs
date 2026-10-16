@@ -4,6 +4,8 @@
 //! она возвращает список `SessionOutput`. Поэтому её легко тестировать,
 //! просто подавая байты. Сеть и таймеры — в `net.rs`.
 
+use std::time::Duration;
+
 use klubok_automation::{Automation, BlankLineFilter, BlankLineSettings, Effect, Hotkey};
 use klubok_proto::telnet::{self, opt};
 use klubok_proto::{
@@ -53,8 +55,12 @@ pub enum SessionInput {
     Raw(String),
     /// Сервер замолчал: показать незаконченную строку как промпт и придержанные пустые строки.
     FlushPartial,
+    /// Пора выполнить таймеры (`#5:10 {…}`, `#delay`, тикер) — см. [`Session::next_deadline`].
+    Timers,
     /// Сервер закрыл соединение.
     Disconnected,
+    /// Заменить все настройки автоматизации (редактор настроек): текст в формате JMC.
+    ReplaceAutomation(String),
 }
 
 /// Что выходит из сессии.
@@ -98,6 +104,8 @@ pub struct Session {
     /// Кодировка уже выбрана в меню при входе.
     charset_selected: bool,
     mapper: Mapper,
+    /// Время от начала сессии (сообщает сетевой цикл через `set_now`).
+    now: Duration,
 }
 
 impl Session {
@@ -110,6 +118,7 @@ impl Session {
             login: config.login.clone().map(AutoLogin::new),
             charset_selected: !config.auto_charset,
             mapper: Mapper::default(),
+            now: Duration::ZERO,
             automation,
             config,
         }
@@ -124,6 +133,17 @@ impl Session {
     /// Есть что показать по таймеру — сетевому циклу стоит запустить `FlushPartial`.
     pub fn has_pending(&self) -> bool {
         self.lines.has_partial() || self.blank.has_pending()
+    }
+
+    /// Сообщает сессии время от её начала. Сетевой цикл вызывает это перед каждым `handle`.
+    pub fn set_now(&mut self, now: Duration) {
+        self.automation.set_now(now);
+        self.now = now;
+    }
+
+    /// Когда (от начала сессии) прислать `SessionInput::Timers`.
+    pub fn next_deadline(&self) -> Option<Duration> {
+        self.automation.next_deadline()
     }
 
     pub fn hotkeys(&self) -> Vec<Hotkey> {
@@ -142,8 +162,19 @@ impl Session {
                 let effects = self.automation.user_input(&command);
                 self.apply_effects(effects, &mut out);
             }
+            SessionInput::ReplaceAutomation(text) => {
+                let mut automation = Automation::new();
+                automation.import(&text);
+                self.automation = automation;
+                self.apply_effects(vec![Effect::Changed], &mut out);
+                out.push(SessionOutput::Echo("Настройки обновлены.".to_string()));
+            }
             SessionInput::Raw(text) => {
                 out.push(SessionOutput::Send(self.encode(&text)));
+            }
+            SessionInput::Timers => {
+                let effects = self.automation.tick(self.now);
+                self.apply_effects(effects, &mut out);
             }
             SessionInput::FlushPartial => {
                 for line in self.blank.flush() {
@@ -160,7 +191,11 @@ impl Session {
                 if let Some(raw) = self.lines.take_partial() {
                     self.on_raw_line(raw, &mut out);
                 }
+                if let Some(line) = self.automation.merge_flush() {
+                    self.show_line(line, false, &mut out);
+                }
                 self.mapper.reset();
+                self.automation.set_connected(false);
                 out.push(SessionOutput::Disconnected);
             }
         }
@@ -175,6 +210,11 @@ impl Session {
                 Effect::Warning(text) => out.push(SessionOutput::Warning(text)),
                 Effect::Bell => out.push(SessionOutput::Bell),
                 Effect::Disconnect => out.push(SessionOutput::CloseRequested),
+                Effect::Client { name, .. } if name == "connect" => {
+                    out.push(SessionOutput::Echo(
+                        "#connect: уже подключены (переподключение — кнопкой вверху)".to_string(),
+                    ));
+                }
                 Effect::Client { name, args } => {
                     let events = self.mapper.command(&name, &args);
                     self.apply_mapper(events, out);
@@ -288,13 +328,31 @@ impl Session {
         let mut effects = Vec::new();
         if is_prompt {
             if !logging_in {
+                // Промпт закрывает незаконченную склейку строк.
+                if let Some(merged) = self.automation.merge_flush() {
+                    self.show_line(merged, false, out);
+                }
                 self.automation.on_prompt(&mut line, &mut effects);
             }
             for held in self.blank.prompt() {
                 out.push(SessionOutput::Line(held));
             }
             out.push(SessionOutput::Prompt(line));
-        } else if logging_in || self.automation.on_line(&mut line, &mut effects) {
+            self.apply_effects(effects, out);
+        } else if logging_in {
+            self.show_line(line, true, out);
+        } else {
+            for line in self.automation.merge_line(line) {
+                self.show_line(line, false, out);
+            }
+        }
+    }
+
+    /// Строка от сервера (уже после склейки): триггеры, замены, подсветка, пустые строки.
+    /// `raw` — показать как есть, без автоматизации (идёт вход).
+    fn show_line(&mut self, mut line: StyledLine, raw: bool, out: &mut Vec<SessionOutput>) {
+        let mut effects = Vec::new();
+        if raw || self.automation.on_line(&mut line, &mut effects) {
             for shown in self.blank.line(line) {
                 out.push(SessionOutput::Line(shown));
             }
@@ -497,5 +555,39 @@ mod tests {
         assert!(out.iter().any(
             |o| matches!(o, SessionOutput::AutomationChanged(t) if t.contains("#alias {а} {б}"))
         ));
+    }
+
+    #[test]
+    fn склейка_строк_до_промпта() {
+        let mut automation = Automation::new();
+        automation.import("#merge {^Вы несете:} {^%0конец} {, }");
+        let config = SessionConfig {
+            auto_charset: false,
+            ..SessionConfig::default()
+        };
+        let mut s = Session::new(config, automation);
+        let mut bytes = "Вы несете:\r\n  меч\r\n  щит\r\n".as_bytes().to_vec();
+        bytes.extend("20H> ".as_bytes());
+        bytes.extend(b"\xff\xf9");
+        let out = feed(&mut s, &bytes);
+        assert_eq!(shown(&out), ["Вы несете:, меч, щит", "20H> "]);
+    }
+
+    #[test]
+    fn таймер_отправляет_команду() {
+        let mut automation = Automation::new();
+        automation.import("#alias {старт} {#delay {2} {см}}");
+        let config = SessionConfig {
+            auto_charset: false,
+            ..SessionConfig::default()
+        };
+        let mut s = Session::new(config, automation);
+        s.set_now(Duration::from_secs(10));
+        let out = s.handle(SessionInput::UserCommand("старт".into())).unwrap();
+        assert!(sent(&out).is_empty());
+        assert_eq!(s.next_deadline(), Some(Duration::from_secs(12)));
+        s.set_now(Duration::from_secs(12));
+        let out = s.handle(SessionInput::Timers).unwrap();
+        assert_eq!(sent(&out), ["см\r\n".as_bytes().to_vec()]);
     }
 }

@@ -44,6 +44,15 @@ pub fn parse_hash_command(command: &str) -> Option<(String, Vec<String>)> {
     Some((name, parse_args(&rest[name_end..])))
 }
 
+/// Всё, что после имени `#`-команды, как есть (для `#script`, где аргумент — код).
+pub fn hash_command_rest(command: &str) -> &str {
+    let rest = command.strip_prefix('#').unwrap_or(command);
+    let name_end = rest
+        .find(|c: char| c.is_whitespace() || c == '{')
+        .unwrap_or(rest.len());
+    rest[name_end..].trim()
+}
+
 /// Аргументы: `{группа со {вложенными} скобками}` или слово до пробела.
 pub fn parse_args(text: &str) -> Vec<String> {
     let mut args = Vec::new();
