@@ -1,0 +1,12 @@
+[package]
+name = "klubok-automation"
+description = "Автоматизация: триггеры, алиасы, rewrite, переменные, таймеры"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+klubok-proto.workspace = true
+
+[lints]
+workspace = true

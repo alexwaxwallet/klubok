@@ -1,0 +1,5 @@
+/target
+/dist
+*.log
+/recordings/*.local.*
+.claude/settings.local.json

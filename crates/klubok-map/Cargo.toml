@@ -1,0 +1,12 @@
+[package]
+name = "klubok-map"
+description = "Карта: комнаты, выходы, зоны, поиск пути"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+
+[lints]
+workspace = true

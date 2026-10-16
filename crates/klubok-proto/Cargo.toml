@@ -1,0 +1,12 @@
+[package]
+name = "klubok-proto"
+description = "Протокол: telnet, MCCP, кодировки, ANSI"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build *)",
+      "Bash(cargo build)",
+      "Bash(cargo test *)",
+      "Bash(cargo test)",
+      "Bash(cargo check *)",
+      "Bash(cargo check)",
+      "Bash(cargo clippy *)",
+      "Bash(cargo clippy)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo fmt)",
+      "Bash(cargo run *)",
+      "Bash(cargo tree *)",
+      "Bash(./scripts/server.sh *)",
+      "Bash(scripts/server.sh *)",
+      "Bash(git status *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git diff)",
+      "Bash(git log *)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/rustfmt.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}

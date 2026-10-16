@@ -1,0 +1,16 @@
+[package]
+name = "klubok-cli"
+description = "Консольный клиент для отладки ядра без UI"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "klubok-cli"
+path = "src/main.rs"
+
+[dependencies]
+klubok-core.workspace = true
+
+[lints]
+workspace = true
