@@ -10,5 +10,19 @@
 
 ```bash
 cargo build --release
-cargo run -p klubok-cli
+cargo run -p klubok-cli -- --host bylins.su --port 4000
 ```
+
+Консольный клиент — отладочный: умеет telnet, сжатие MCCP v2, MSDP, кодировки
+UTF-8 / KOI8-R / CP1251, ANSI-цвета и схлопывание лишних пустых строк.
+
+```bash
+cargo run -p klubok-cli -- --help
+cargo run -p klubok-cli -- --debug                        # показывать MSDP и переговоры
+cargo run -p klubok-cli -- --record recordings/x.local.bin # записать трафик
+cargo run -p klubok-cli -- --replay recordings/x.local.bin # прогнать запись без сети
+```
+
+## Лицензия
+
+[GPL-3.0-or-later](LICENSE)

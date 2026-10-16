@@ -3,6 +3,7 @@ name = "klubok-cli"
 description = "Консольный клиент для отладки ядра без UI"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 repository.workspace = true
 
 [[bin]]
@@ -10,7 +11,12 @@ name = "klubok-cli"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+klubok-automation.workspace = true
 klubok-core.workspace = true
+klubok-proto.workspace = true
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "fs"] }
 
 [lints]
 workspace = true

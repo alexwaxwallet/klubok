@@ -3,12 +3,15 @@ name = "klubok-core"
 description = "Сессия: цикл-владелец, связывающий контексты"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 repository.workspace = true
 
 [dependencies]
 klubok-proto.workspace = true
 klubok-automation.workspace = true
 klubok-map.workspace = true
+tokio = { version = "1.53.3", features = ["net", "io-util", "rt", "macros", "sync", "time"] }
+anyhow = "1.0.104"
 
 [lints]
 workspace = true
