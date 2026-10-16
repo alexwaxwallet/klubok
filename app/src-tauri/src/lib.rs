@@ -11,12 +11,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use klubok_core::{
-    Automation, Credentials, Profile, ProfileStore, SessionConfig, SessionInput, SessionOutput,
-    decode_settings_file,
+    Automation, Credentials, Mapper, Profile, ProfileStore, Session, SessionConfig, SessionInput,
+    SessionOutput, decode_settings_file,
 };
+use klubok_map::{MapStore, SqliteStore};
 use klubok_proto::Charset;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
@@ -76,6 +78,36 @@ fn is_writable(dir: &Path) -> bool {
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+/// Файл карты профиля: `<данные>/maps/<имя>.sqlite`.
+fn map_path(data_dir: &Path, profile: &Profile) -> PathBuf {
+    let name: String = profile
+        .map
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = if name.is_empty() {
+        "bylins".to_string()
+    } else {
+        name
+    };
+    data_dir.join("maps").join(format!("{name}.sqlite"))
+}
+
+fn open_map(data_dir: &Path, profile: &Profile) -> Result<SqliteStore, String> {
+    let path = map_path(data_dir, profile);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(err)?;
+    }
+    SqliteStore::open(&path).map_err(|e| format!("карта {}: {e}", path.display()))
 }
 
 // ───────────────────────────── профили ─────────────────────────────
@@ -188,6 +220,95 @@ fn import_set(
     })
 }
 
+#[derive(Serialize)]
+struct MapImportResult {
+    files: usize,
+    rooms_total: usize,
+    /// Сколько комнат добавлено (уже известные карте не перезаписываются).
+    rooms_added: usize,
+    synthetic: usize,
+    duplicates: usize,
+    unresolved_exits: usize,
+    errors: Vec<String>,
+}
+
+/// Добавляет в карту профиля карты MudMapper: игрок выбирает папку с файлами `.mm2`.
+/// `None` — выбор отменён.
+#[tauri::command]
+async fn import_mm2(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<MapImportResult>, String> {
+    if state.connected_profile().is_some() {
+        return Err("Импорт карты — только при отключённом клиенте.".into());
+    }
+    let Some(folder) = app
+        .dialog()
+        .file()
+        .set_title("Папка с картами MudMapper (.mm2)")
+        .blocking_pick_folder()
+    else {
+        return Ok(None);
+    };
+    let folder = folder.into_path().map_err(err)?;
+    let profile = state.store.load(&id).map_err(err)?;
+    let data_dir = state.data_dir.clone();
+
+    // Чтение и запись карты — долгие, уводим с потока команд.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut zones = Vec::new();
+        let mut errors = Vec::new();
+        let entries = std::fs::read_dir(&folder).map_err(err)?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("mm2"))
+            {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            match std::fs::read(&path)
+                .map_err(err)
+                .and_then(|b| klubok_mm2::load_mm2(&b).map_err(err))
+            {
+                Ok(zone) => zones.push((name, zone)),
+                Err(e) => errors.push(format!("{name}: {e}")),
+            }
+        }
+        if zones.is_empty() {
+            return Err(format!("в папке {} нет карт .mm2", folder.display()));
+        }
+        let (imported, stats) = klubok_mm2::convert::to_map(&zones);
+
+        let mut store = open_map(&data_dir, &profile)?;
+        let mut map = store.load().map_err(err)?;
+        let before = map.len();
+        for room in imported.rooms() {
+            if map.room(room.vnum).is_none() {
+                map.insert_room(room.clone());
+            }
+        }
+        let rooms_added = map.len() - before;
+        store.save_map(&map).map_err(err)?;
+        Ok(Some(MapImportResult {
+            files: zones.len(),
+            rooms_total: stats.rooms,
+            rooms_added,
+            synthetic: stats.synthetic,
+            duplicates: stats.duplicates,
+            unresolved_exits: stats.unresolved_exits,
+            errors,
+        }))
+    })
+    .await
+    .map_err(err)?
+}
+
 // ───────────────────────────── подключение ─────────────────────────────
 
 #[tauri::command]
@@ -214,6 +335,11 @@ fn connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(),
         ..SessionConfig::default()
     };
 
+    let mut store = open_map(&state.data_dir, &profile)?;
+    let map = store.load().map_err(err)?;
+    let session =
+        Session::new(config, automation).with_mapper(Mapper::new(map, Some(Box::new(store))));
+
     let (input_tx, input_rx) = mpsc::channel::<SessionInput>(64);
     let (event_tx, event_rx) = mpsc::channel::<SessionOutput>(4096);
     // Старое подключение закроется само: его канал ввода выбрасывается здесь.
@@ -222,8 +348,7 @@ fn connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(),
     let address = format!("{}:{}", profile.host, profile.port);
     let app_for_session = app.clone();
     tauri::async_runtime::spawn(async move {
-        let result =
-            klubok_core::run_session(&address, config, automation, input_rx, event_tx, None).await;
+        let result = klubok_core::run_session(&address, session, input_rx, event_tx, None).await;
         if let Err(error) = result {
             let _ = app_for_session.emit(
                 "session",
@@ -348,6 +473,7 @@ async fn forward_events(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = find_data_dir(app.handle());
             app.manage(AppState {
@@ -363,6 +489,7 @@ pub fn run() {
             save_profile,
             delete_profile,
             import_set,
+            import_mm2,
             connect,
             send,
             disconnect

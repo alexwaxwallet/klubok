@@ -17,6 +17,7 @@
 //!   труба — идём по трубам дальше, до первой комнаты.
 //! - Выход в другую зону — строка `AutoMaps.Strings` вида `Зона|на север|Tag[|команды]`.
 
+pub mod convert;
 pub mod dfm;
 
 use std::collections::HashMap;

@@ -10,7 +10,7 @@ use crate::map::Map;
 use crate::model::{Direction, Exit, Room};
 
 /// Текущая версия схемы базы (хранится в `PRAGMA user_version`).
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Ошибки хранилища.
 #[derive(Debug, thiserror::Error)]
@@ -83,7 +83,12 @@ pub struct SqliteStore {
 impl SqliteStore {
     /// Открыть (или создать) базу в файле и привести схему к актуальной.
     pub fn open(path: impl AsRef<Path>) -> Result<SqliteStore, StoreError> {
-        SqliteStore::from_connection(Connection::open(path)?)
+        let conn = Connection::open(path)?;
+        // Журнал WAL и «обычная» синхронизация: запись комнаты на каждом шаге
+        // не ждёт полного сброса на диск, а база при сбое всё равно остаётся целой.
+        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+        SqliteStore::from_connection(conn)
     }
 
     /// База в памяти (пропадает при закрытии).
@@ -131,15 +136,25 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
-        // Будущие миграции: `if version < 2 { ... PRAGMA user_version = 2; }`.
+        if version < 2 {
+            // Цвет клетки и пометки (`dt`, `aggro`…) через запятую.
+            self.conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE rooms ADD COLUMN color TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE rooms ADD COLUMN flags TEXT NOT NULL DEFAULT '';
+                 PRAGMA user_version = 2;
+                 COMMIT;",
+            )?;
+        }
         Ok(())
     }
 
     /// Записать комнату внутри уже открытой транзакции.
     fn write_room(tx: &rusqlite::Transaction, room: &Room) -> Result<(), StoreError> {
         tx.execute(
-            "INSERT OR REPLACE INTO rooms (vnum, name, area, zone, terrain, x, y, z, note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO rooms
+                 (vnum, name, area, zone, terrain, x, y, z, note, color, flags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 room.vnum,
                 room.name,
@@ -149,7 +164,9 @@ impl SqliteStore {
                 room.x,
                 room.y,
                 room.z,
-                room.note
+                room.note,
+                room.color,
+                room.flags.join(",")
             ],
         )?;
         tx.execute("DELETE FROM exits WHERE from_vnum = ?1", params![room.vnum])?;
@@ -168,9 +185,9 @@ impl MapStore for SqliteStore {
     fn load(&mut self) -> Result<Map, StoreError> {
         let mut map = Map::new();
 
-        let mut rooms = self
-            .conn
-            .prepare("SELECT vnum, name, area, zone, terrain, x, y, z, note FROM rooms")?;
+        let mut rooms = self.conn.prepare(
+            "SELECT vnum, name, area, zone, terrain, x, y, z, note, color, flags FROM rooms",
+        )?;
         let rows = rooms.query_map([], |row| {
             Ok(Room {
                 vnum: row.get(0)?,
@@ -183,6 +200,8 @@ impl MapStore for SqliteStore {
                 y: row.get(6)?,
                 z: row.get(7)?,
                 note: row.get(8)?,
+                color: row.get(9)?,
+                flags: split_flags(&row.get::<_, String>(10)?),
             })
         })?;
         for room in rows {
@@ -244,6 +263,14 @@ impl MapStore for SqliteStore {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// `"dt,aggro"` → `["dt", "aggro"]`.
+fn split_flags(text: &str) -> Vec<String> {
+    text.split(',')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Версия схемы в открытой базе (для диагностики).

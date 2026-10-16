@@ -3,7 +3,7 @@
 //! Цвета превращаются в строки, понятные CSS: `"c0"`…`"c15"` — 16 стандартных цветов
 //! (их оттенки задаёт тема интерфейса), `"#rrggbb"` — всё остальное.
 
-use klubok_core::SessionOutput;
+use klubok_core::{MapView, SessionOutput};
 use klubok_proto::{Color, MsdpValue, StyledLine};
 use serde::Serialize;
 
@@ -63,7 +63,76 @@ pub enum UiEvent {
     Hotkeys {
         hotkeys: Vec<UiHotkey>,
     },
+    /// Карта текущей зоны и уровня.
+    Map {
+        current: u32,
+        zone: u32,
+        area: String,
+        z: i32,
+        rooms: Vec<UiMapRoom>,
+        path: Vec<u32>,
+    },
     Disconnected,
+}
+
+/// Комната для рисования карты. `y` растёт на север.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiMapRoom {
+    pub vnum: u32,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub color: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flags: Vec<String>,
+    pub exits: Vec<UiMapExit>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UiMapExit {
+    pub dir: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<u32>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub door: bool,
+}
+
+fn map_event(view: MapView) -> UiEvent {
+    UiEvent::Map {
+        current: view.current,
+        zone: view.zone,
+        area: view.area,
+        z: view.z,
+        rooms: view
+            .rooms
+            .into_iter()
+            .map(|r| UiMapRoom {
+                vnum: r.vnum,
+                exits: r
+                    .exits
+                    .iter()
+                    .map(|(dir, exit)| UiMapExit {
+                        dir: dir.msdp_key(),
+                        to: exit.to,
+                        hidden: exit.hidden,
+                        door: exit.door.is_some(),
+                    })
+                    .collect(),
+                name: r.name,
+                x: r.x,
+                y: r.y,
+                note: r.note,
+                color: r.color,
+                flags: r.flags,
+            })
+            .collect(),
+        path: view.path,
+    }
 }
 
 /// Горячая клавиша: `key` в записи JMC (`Ctrl+NUM7`), `body` — что выполнить.
@@ -98,6 +167,7 @@ impl UiEvent {
                     })
                     .collect(),
             }),
+            SessionOutput::Map(view) => Some(map_event(view)),
             SessionOutput::Disconnected => Some(UiEvent::Disconnected),
             // Сохранение настроек и отправка серверу обрабатываются до интерфейса.
             SessionOutput::AutomationChanged(_)

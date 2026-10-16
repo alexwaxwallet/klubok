@@ -13,6 +13,7 @@ klubok-proto = { path = "crates/klubok-proto" }
 klubok-automation = { path = "crates/klubok-automation" }
 klubok-map = { path = "crates/klubok-map" }
 klubok-core = { path = "crates/klubok-core" }
+klubok-mm2 = { path = "crates/klubok-mm2" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

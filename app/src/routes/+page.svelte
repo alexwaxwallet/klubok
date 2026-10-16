@@ -3,6 +3,7 @@
   import Output, { type OutputLine } from "$lib/Output.svelte";
   import CommandInput from "$lib/CommandInput.svelte";
   import ProfileDialog from "$lib/ProfileDialog.svelte";
+  import MapPanel from "$lib/MapPanel.svelte";
   import { describeEvent, eventKeyName, normalizeSpec } from "$lib/hotkeys";
   import {
     connect,
@@ -13,6 +14,7 @@
     send,
     type Exit,
     type Hotkey,
+    type MapView,
     type ProfileInfo,
     type SessionEvent,
   } from "$lib/session";
@@ -42,6 +44,7 @@
   let lines: OutputLine[] = $state.raw([]);
   let connected = $state(false);
   let room: Room | null = $state(null);
+  let mapView: MapView | null = $state.raw(null);
   let profiles: ProfileInfo[] = $state([]);
   let passwordStorage = $state("");
   let selectedId = $state("");
@@ -124,6 +127,9 @@
         case "room":
           room = event;
           break;
+        case "map":
+          mapView = event;
+          break;
         case "echo":
           add("echo", event.text);
           break;
@@ -177,6 +183,7 @@
     const { profile } = selected;
     note("info", `Подключаюсь к ${profile.host}:${profile.port} (${profile.name})…`);
     room = null;
+    mapView = null;
     try {
       await connect(selectedId);
       connected = true;
@@ -353,6 +360,9 @@
             >
           {/each}
         </div>
+        {#if mapView}
+          <MapPanel view={mapView} ongo={(vnum) => submit(`#go ${vnum}`)} />
+        {/if}
       </aside>
     {/if}
   </main>
@@ -444,11 +454,14 @@
   }
 
   .room {
-    width: 240px;
+    width: 320px;
     padding: 12px;
     border-left: 1px solid var(--panel-border);
     background: var(--panel);
-    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
   }
 
   .room-name {
@@ -460,7 +473,6 @@
   .room-meta {
     color: var(--muted);
     font-size: 12px;
-    margin-bottom: 12px;
   }
 
   .exits {
@@ -493,7 +505,7 @@
       width: auto;
       border-left: none;
       border-top: 1px solid var(--panel-border);
-      max-height: 30vh;
+      max-height: 40vh;
     }
 
     .logo {

@@ -1,10 +1,12 @@
 <script lang="ts">
   import {
     deleteProfile,
+    importMm2,
     importSet,
     newProfile,
     saveProfile,
     type ImportResult,
+    type MapImportResult,
     type ProfileInfo,
   } from "./session";
 
@@ -33,6 +35,24 @@
   let busy = $state(false);
   let importResult: ImportResult | null = $state(null);
   let fileInput: HTMLInputElement;
+  let mapResult: MapImportResult | null = $state(null);
+  let mapBusy = $state(false);
+
+  async function importMap() {
+    const target = id ?? (await save());
+    if (!target) return;
+    mapBusy = true;
+    try {
+      // Имя карты могли поменять — сначала сохраняем профиль.
+      await save();
+      mapResult = await importMm2(target);
+      error = "";
+    } catch (e) {
+      error = String(e);
+    } finally {
+      mapBusy = false;
+    }
+  }
 
   async function save(): Promise<string | null> {
     error = "";
@@ -192,6 +212,32 @@
             Сохранено, но пока не работает:
             {importResult.unsupported.map(([name, n]) => `${name} × ${n}`).join(", ")}.
           </p>
+        {/if}
+      {/if}
+    </fieldset>
+
+    <fieldset>
+      <legend>Карта</legend>
+      <label>
+        Имя карты
+        <input bind:value={profile.map} placeholder="bylins" />
+      </label>
+      <p class="hint">
+        Профили с одинаковым именем карты делят одну карту. Карта строится сама по ходу игры;
+        можно добавить старые карты MudMapper — выберите папку с файлами <code>.mm2</code>.
+        Уже известные комнаты не перезаписываются.
+      </p>
+      <button type="button" onclick={importMap} disabled={busy || mapBusy}>
+        {mapBusy ? "Импорт…" : "Импорт карт MudMapper…"}
+      </button>
+      {#if mapResult}
+        <p class="report">
+          Файлов {mapResult.files}, комнат в них {mapResult.rooms_total}, добавлено
+          {mapResult.rooms_added}. Без номера комнаты: {mapResult.synthetic}, повторов номера:
+          {mapResult.duplicates}, выходов без цели: {mapResult.unresolved_exits}.
+        </p>
+        {#if mapResult.errors.length > 0}
+          <p class="hint">Не прочитаны: {mapResult.errors.join("; ")}</p>
         {/if}
       {/if}
     </fieldset>

@@ -133,7 +133,14 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let session = tokio::spawn(async move {
-        klubok_core::run_session(&address, config, automation, command_rx, event_tx, recorder).await
+        klubok_core::run_session(
+            &address,
+            klubok_core::Session::new(config, automation),
+            command_rx,
+            event_tx,
+            recorder,
+        )
+        .await
     });
 
     while let Some(output) = event_rx.recv().await {

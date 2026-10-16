@@ -18,14 +18,13 @@ const PARTIAL_LINE_TIMEOUT: Duration = Duration::from_millis(150);
 /// Подключается к серверу и крутит сессию, пока не закроется соединение
 /// или не закроется канал команд.
 ///
-/// * `automation` — алиасы, триггеры и прочие настройки профиля;
+/// * `session` — сессия с настройками, автоматизацией и картой профиля;
 /// * `commands` — ввод игрока (`UserCommand`, `Raw`);
 /// * `events` — всё, что нужно показать (строки, промпты, MSDP, служебные сообщения);
 /// * `recorder` — если задан, туда пишутся сырые байты от сервера (для replay и тестов).
 pub async fn run_session(
     address: &str,
-    config: SessionConfig,
-    automation: Automation,
+    mut session: Session,
     mut commands: mpsc::Receiver<SessionInput>,
     events: mpsc::Sender<SessionOutput>,
     mut recorder: Option<std::fs::File>,
@@ -34,7 +33,6 @@ pub async fn run_session(
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
 
-    let mut session = Session::new(config, automation);
     // Горячие клавиши — сразу, чтобы интерфейс знал их до первой строки от сервера.
     if events
         .send(SessionOutput::HotkeysChanged(session.hotkeys()))

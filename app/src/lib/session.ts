@@ -34,7 +34,50 @@ export type SessionEvent =
   | { type: "error"; text: string }
   | { type: "bell" }
   | { type: "hotkeys"; hotkeys: Hotkey[] }
+  | ({ type: "map" } & MapView)
   | { type: "disconnected" };
+
+export interface MapExit {
+  /** `n`, `e`, `s`, `w`, `u`, `d`. */
+  dir: string;
+  to?: number;
+  hidden?: boolean;
+  door?: boolean;
+}
+
+export interface MapRoom {
+  vnum: number;
+  name: string;
+  /** Координаты сетки; y растёт на север. */
+  x: number;
+  y: number;
+  note?: string;
+  color?: string;
+  /** `dt`, `aggro`, `flydt`, `nostep`. */
+  flags?: string[];
+  exits: MapExit[];
+}
+
+/** Карта текущей зоны и уровня. */
+export interface MapView {
+  current: number;
+  zone: number;
+  area: string;
+  z: number;
+  rooms: MapRoom[];
+  /** Оставшийся путь `#go`. */
+  path: number[];
+}
+
+export interface MapImportResult {
+  files: number;
+  rooms_total: number;
+  rooms_added: number;
+  synthetic: number;
+  duplicates: number;
+  unresolved_exits: number;
+  errors: string[];
+}
 
 export interface BlankLines {
   max_consecutive: number;
@@ -50,6 +93,8 @@ export interface Profile {
   /** Имя персонажа для автовхода. */
   character: string;
   blank_lines: BlankLines;
+  /** Имя карты (файл в папке данных). Профили одного мира делят одну карту. */
+  map: string;
 }
 
 export interface ProfileInfo {
@@ -84,6 +129,7 @@ export function newProfile(): Profile {
     charset: "utf8",
     character: "",
     blank_lines: { max_consecutive: 1, trim_after_prompt: true, trim_before_prompt: true },
+    map: "bylins",
   };
 }
 
@@ -102,6 +148,11 @@ export function deleteProfile(id: string): Promise<void> {
 
 export function importSet(id: string, bytes: Uint8Array): Promise<ImportResult> {
   return invoke("import_set", { id, bytes: Array.from(bytes) });
+}
+
+/** Импорт карт MudMapper: откроется выбор папки. null — выбор отменён. */
+export function importMm2(id: string): Promise<MapImportResult | null> {
+  return invoke("import_mm2", { id });
 }
 
 export function connect(id: string): Promise<void> {

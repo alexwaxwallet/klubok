@@ -25,6 +25,8 @@ pub struct Profile {
     /// Имя персонажа для автовхода (пусто — без автовхода).
     pub character: String,
     pub blank_lines: BlankLineSettings,
+    /// Имя карты: файл `<данные>/maps/<map>.sqlite`. Профили одного мира делят карту.
+    pub map: String,
 }
 
 impl Default for Profile {
@@ -36,6 +38,7 @@ impl Default for Profile {
             charset: "utf8".to_string(),
             character: String::new(),
             blank_lines: BlankLineSettings::default(),
+            map: "bylins".to_string(),
         }
     }
 }

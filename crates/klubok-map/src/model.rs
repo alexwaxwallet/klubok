@@ -162,6 +162,13 @@ pub struct Room {
     /// Заметка игрока.
     #[serde(default)]
     pub note: String,
+    /// Цвет клетки на карте (`#rrggbb`); пусто — обычный.
+    #[serde(default)]
+    pub color: String,
+    /// Пометки: `dt` — смертельная ловушка, `aggro` — агрессивные мобы,
+    /// `flydt` — ловушка, если не летать, `nostep` — сюда не ходить.
+    #[serde(default)]
+    pub flags: Vec<String>,
 }
 
 impl Room {

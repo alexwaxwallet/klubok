@@ -12,6 +12,7 @@ use klubok_proto::{
 };
 
 use crate::login::{AutoLogin, Credentials, LoginStep};
+use crate::mapper::{MapView, Mapper, MapperEvent};
 
 /// Настройки подключения.
 #[derive(Debug, Clone)]
@@ -79,6 +80,8 @@ pub enum SessionOutput {
     AutomationChanged(String),
     /// Список горячих клавиш изменился.
     HotkeysChanged(Vec<Hotkey>),
+    /// Карта вокруг игрока (текущая зона и уровень).
+    Map(MapView),
     /// Нужно разорвать соединение (`#zap`).
     CloseRequested,
     Disconnected,
@@ -94,6 +97,7 @@ pub struct Session {
     login: Option<AutoLogin>,
     /// Кодировка уже выбрана в меню при входе.
     charset_selected: bool,
+    mapper: Mapper,
 }
 
 impl Session {
@@ -105,9 +109,16 @@ impl Session {
             blank: BlankLineFilter::new(config.blank_lines),
             login: config.login.clone().map(AutoLogin::new),
             charset_selected: !config.auto_charset,
+            mapper: Mapper::default(),
             automation,
             config,
         }
+    }
+
+    /// Подключает карту (по умолчанию — пустая карта в памяти).
+    pub fn with_mapper(mut self, mapper: Mapper) -> Session {
+        self.mapper = mapper;
+        self
     }
 
     /// Есть что показать по таймеру — сетевому циклу стоит запустить `FlushPartial`.
@@ -149,6 +160,7 @@ impl Session {
                 if let Some(raw) = self.lines.take_partial() {
                     self.on_raw_line(raw, &mut out);
                 }
+                self.mapper.reset();
                 out.push(SessionOutput::Disconnected);
             }
         }
@@ -158,11 +170,15 @@ impl Session {
     fn apply_effects(&mut self, effects: Vec<Effect>, out: &mut Vec<SessionOutput>) {
         for effect in effects {
             match effect {
-                Effect::Send(text) => out.push(SessionOutput::Send(self.encode(&text))),
+                Effect::Send(text) => self.send(&text, out),
                 Effect::Echo(text) => out.push(SessionOutput::Echo(text)),
                 Effect::Warning(text) => out.push(SessionOutput::Warning(text)),
                 Effect::Bell => out.push(SessionOutput::Bell),
                 Effect::Disconnect => out.push(SessionOutput::CloseRequested),
+                Effect::Client { name, args } => {
+                    let events = self.mapper.command(&name, &args);
+                    self.apply_mapper(events, out);
+                }
                 Effect::Changed => {
                     out.push(SessionOutput::AutomationChanged(
                         self.automation.to_script(),
@@ -171,6 +187,23 @@ impl Session {
                         self.automation.active_hotkeys(),
                     ));
                 }
+            }
+        }
+    }
+
+    /// Команда серверу: маппер запоминает шаги, чтобы узнать скрытые выходы.
+    fn send(&mut self, text: &str, out: &mut Vec<SessionOutput>) {
+        self.mapper.note_sent(text);
+        out.push(SessionOutput::Send(self.encode(text)));
+    }
+
+    fn apply_mapper(&mut self, events: Vec<MapperEvent>, out: &mut Vec<SessionOutput>) {
+        for event in events {
+            match event {
+                MapperEvent::Send(text) => self.send(&text, out),
+                MapperEvent::Echo(text) => out.push(SessionOutput::Echo(text)),
+                MapperEvent::Warning(text) => out.push(SessionOutput::Warning(text)),
+                MapperEvent::View(view) => out.push(SessionOutput::Map(view)),
             }
         }
     }
@@ -194,7 +227,13 @@ impl Session {
             TelnetEvent::Negotiate(verb, option) => self.negotiate(verb, option, out),
             TelnetEvent::Subnegotiation(opt::MSDP, data) => {
                 for (name, value) in msdp::decode(&data, self.config.charset) {
-                    out.push(SessionOutput::Msdp(name, value));
+                    if name == "ROOM" {
+                        let events = self.mapper.on_room(&value);
+                        out.push(SessionOutput::Msdp(name, value));
+                        self.apply_mapper(events, out);
+                    } else {
+                        out.push(SessionOutput::Msdp(name, value));
+                    }
                 }
             }
             TelnetEvent::Subnegotiation(option, _) => {
