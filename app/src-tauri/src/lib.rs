@@ -428,6 +428,25 @@ async fn send(state: State<'_, AppState>, text: String, raw: bool) -> Result<(),
     }
 }
 
+/// Правка карты мышью (сдвиг, удаление комнат) — только при подключении:
+/// карта живёт в сессии.
+#[tauri::command]
+async fn map_edit(state: State<'_, AppState>, edit: klubok_core::MapEdit) -> Result<(), String> {
+    let sender = state
+        .connection
+        .lock()
+        .map_err(err)?
+        .as_ref()
+        .map(|(_, tx)| tx.clone());
+    match sender {
+        Some(tx) => tx
+            .send(SessionInput::MapEdit(edit))
+            .await
+            .map_err(|_| "нет подключения".to_string()),
+        None => Err("Править карту можно при подключении.".to_string()),
+    }
+}
+
 #[tauri::command]
 fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     // Закрытие канала ввода завершает сетевой цикл.
@@ -543,6 +562,7 @@ pub fn run() {
             set_automation,
             connect,
             send,
+            map_edit,
             disconnect
         ])
         .run(tauri::generate_context!())

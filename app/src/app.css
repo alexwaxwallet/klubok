@@ -9,9 +9,13 @@
   --accent: #d9a35b;
   --danger: #e06c6c;
   --input-bg: #1d2026;
-  --map-room: #3a4250;
-  --map-room-border: #596273;
-  --map-exit: #8a919c;
+  --map-bg: #0d3a6b;
+  --map-room: #c4c4c4;
+  --map-room-light: #f2f2f2;
+  --map-room-dark: #6f6f6f;
+  --map-link: #c4c4c4;
+  --map-stub: #8fa3b8;
+  --map-door: #d9a35b;
 
   --c0: #3a3d44;
   --c1: #c0504d;

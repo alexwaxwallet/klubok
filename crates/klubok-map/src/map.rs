@@ -297,6 +297,22 @@ impl Map {
         None
     }
 
+    /// Цвет клетки (`#rrggbb`; пусто — обычный).
+    pub fn set_color(&mut self, vnum: u32, color: &str) -> Result<(), MapError> {
+        self.room_mut(vnum)?.color = color.to_string();
+        Ok(())
+    }
+
+    /// Поставить или снять пометку (`dt`, `aggro`, `nostep`…).
+    pub fn set_flag(&mut self, vnum: u32, flag: &str, on: bool) -> Result<(), MapError> {
+        let room = self.room_mut(vnum)?;
+        room.flags.retain(|f| f != flag);
+        if on {
+            room.flags.push(flag.to_string());
+        }
+        Ok(())
+    }
+
     /// Задать заметку игрока.
     pub fn set_note(&mut self, vnum: u32, note: &str) -> Result<(), MapError> {
         let room = self.room_mut(vnum)?;

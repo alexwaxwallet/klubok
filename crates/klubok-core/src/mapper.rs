@@ -27,6 +27,30 @@ pub struct MapView {
     pub path: Vec<u32>,
 }
 
+/// Правка карты из интерфейса (режим правки на панели карты).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum MapEdit {
+    /// Сдвинуть комнаты на `dx`, `dy` клеток (y растёт на север) и `dz` уровней.
+    Move {
+        rooms: Vec<u32>,
+        dx: i32,
+        dy: i32,
+        dz: i32,
+    },
+    /// Удалить комнаты с карты. Выходы других комнат, ведущие в них, остаются:
+    /// если комнату снова посетят, она появится и связи восстановятся.
+    Delete { rooms: Vec<u32> },
+    /// Покрасить клетки (`#rrggbb`; пусто — снять цвет).
+    Color { rooms: Vec<u32>, color: String },
+    /// Поставить (`on`) или снять пометку: `dt`, `aggro`, `flydt`, `nostep`.
+    Flag {
+        rooms: Vec<u32>,
+        flag: String,
+        on: bool,
+    },
+}
+
 /// Что маппер просит сделать сессию.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MapperEvent {
@@ -285,6 +309,62 @@ impl Mapper {
             steps.push_back((dir, room));
         }
         Some(steps)
+    }
+
+    // ───────────────────────────── правка мышью ─────────────────────────────
+
+    pub fn edit(&mut self, edit: MapEdit) -> Vec<MapperEvent> {
+        let mut out = Vec::new();
+        match edit {
+            MapEdit::Move { rooms, dx, dy, dz } => {
+                for vnum in rooms {
+                    let Some(room) = self.map.room(vnum) else {
+                        continue;
+                    };
+                    let (x, y, z) = (room.x + dx, room.y + dy, room.z + dz);
+                    let _ = self.map.move_room(vnum, x, y, z);
+                    self.save(vnum, &mut out);
+                }
+            }
+            MapEdit::Delete { rooms } => {
+                for vnum in rooms {
+                    if self.map.remove_room(vnum).is_none() {
+                        continue;
+                    }
+                    if let Some(store) = self.store.as_mut()
+                        && let Err(e) = store.delete_room(vnum)
+                    {
+                        out.push(MapperEvent::Warning(format!(
+                            "комната {vnum} не удалена: {e}"
+                        )));
+                    }
+                }
+                // Стоим в удалённой комнате — попросим сервер о ней заново при следующем шаге.
+                if self
+                    .tracker
+                    .current()
+                    .is_some_and(|v| self.map.room(v).is_none())
+                {
+                    self.tracker.reset();
+                }
+            }
+            MapEdit::Color { rooms, color } => {
+                for vnum in rooms {
+                    if self.map.set_color(vnum, &color).is_ok() {
+                        self.save(vnum, &mut out);
+                    }
+                }
+            }
+            MapEdit::Flag { rooms, flag, on } => {
+                for vnum in rooms {
+                    if self.map.set_flag(vnum, &flag, on).is_ok() {
+                        self.save(vnum, &mut out);
+                    }
+                }
+            }
+        }
+        out.extend(self.view().map(MapperEvent::View));
+        out
     }
 
     // ───────────────────────────── команды ─────────────────────────────
@@ -653,5 +733,40 @@ mod tests {
         assert!(!exits.contains_key(&Direction::North));
         assert_eq!(exits[&Direction::West].to, Some(101));
         assert!(!exits[&Direction::West].hidden);
+    }
+
+    #[test]
+    fn правка_мышью_сдвиг_и_удаление() {
+        let mut m = Mapper::default();
+        walked(&mut m);
+        m.edit(MapEdit::Move {
+            rooms: vec![101, 102],
+            dx: 2,
+            dy: 0,
+            dz: 0,
+        });
+        assert_eq!(m.map().room(101).unwrap().x, 3);
+        assert_eq!(m.map().room(102).unwrap().x, 3);
+        m.edit(MapEdit::Delete { rooms: vec![100] });
+        assert!(m.map().room(100).is_none());
+        // Выход в удалённую комнату остаётся — он однонаправленный и верный.
+        assert_eq!(
+            m.map().room(101).unwrap().exits[&Direction::West].to,
+            Some(100)
+        );
+        m.edit(MapEdit::Color {
+            rooms: vec![101],
+            color: "#ffff00".into(),
+        });
+        m.edit(MapEdit::Flag {
+            rooms: vec![101],
+            flag: "dt".into(),
+            on: true,
+        });
+        let room = m.map().room(101).unwrap();
+        assert_eq!(
+            (room.color.as_str(), room.flags.as_slice()),
+            ("#ffff00", &["dt".to_string()][..])
+        );
     }
 }

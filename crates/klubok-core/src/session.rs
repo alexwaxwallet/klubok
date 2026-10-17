@@ -14,7 +14,7 @@ use klubok_proto::{
 };
 
 use crate::login::{AutoLogin, Credentials, LoginStep};
-use crate::mapper::{MapView, Mapper, MapperEvent};
+use crate::mapper::{MapEdit, MapView, Mapper, MapperEvent};
 
 /// Настройки подключения.
 #[derive(Debug, Clone)]
@@ -61,6 +61,8 @@ pub enum SessionInput {
     Disconnected,
     /// Заменить все настройки автоматизации (редактор настроек): текст в формате JMC.
     ReplaceAutomation(String),
+    /// Правка карты мышью.
+    MapEdit(MapEdit),
 }
 
 /// Что выходит из сессии.
@@ -181,6 +183,10 @@ impl Session {
             SessionInput::UserCommand(command) => {
                 let effects = self.automation.user_input(&command);
                 self.apply_effects(effects, &mut out);
+            }
+            SessionInput::MapEdit(edit) => {
+                let events = self.mapper.edit(edit);
+                self.apply_mapper(events, &mut out);
             }
             SessionInput::ReplaceAutomation(text) => {
                 let mut automation = Automation::new();

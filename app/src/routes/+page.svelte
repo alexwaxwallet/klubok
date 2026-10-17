@@ -16,6 +16,7 @@
     type Exit,
     type Hotkey,
     type MapView,
+    mapEdit,
     type ProfileInfo,
     type SessionEvent,
   } from "$lib/session";
@@ -291,6 +292,8 @@
   /** Горячие клавиши проверяются до поля ввода, чтобы цифровой блок не печатал цифры. */
   function onKeydownCapture(event: KeyboardEvent) {
     if (editing !== undefined || editingAutomation) return;
+    // Карта в режиме правки сама ловит стрелки и Delete.
+    if ((event.target as HTMLElement).closest?.("[data-no-hotkeys]")) return;
     const name = eventKeyName(event);
     if (keytest && name !== null) {
       const bound = hotkeys.get(name);
@@ -435,7 +438,11 @@
           </section>
         {/each}
         {#if mapView}
-          <MapPanel view={mapView} ongo={(vnum) => submit(`#go ${vnum}`)} />
+          <MapPanel
+            view={mapView}
+            ongo={(vnum) => submit(`#go ${vnum}`)}
+            onedit={(edit) => mapEdit(edit).catch((e) => note("error", String(e)))}
+          />
         {:else if room}
           <p class="map-hint">Карта появится, когда сервер пришлёт комнату.</p>
         {/if}

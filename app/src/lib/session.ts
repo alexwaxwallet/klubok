@@ -73,6 +73,17 @@ export interface MapView {
   path: number[];
 }
 
+/** Правка карты мышью. dy — на север, dz — уровни. */
+export type MapEdit =
+  | { type: "move"; rooms: number[]; dx: number; dy: number; dz: number }
+  | { type: "delete"; rooms: number[] }
+  | { type: "color"; rooms: number[]; color: string }
+  | { type: "flag"; rooms: number[]; flag: string; on: boolean };
+
+export function mapEdit(edit: MapEdit): Promise<void> {
+  return invoke("map_edit", { edit });
+}
+
 export interface MapImportResult {
   files: number;
   rooms_total: number;
