@@ -361,6 +361,7 @@ impl Session {
             }
             if !logging_in {
                 self.request_room(&text, out);
+                self.mapper.on_prompt();
             }
             out.push(SessionOutput::Prompt(line));
             self.apply_effects(effects, out);

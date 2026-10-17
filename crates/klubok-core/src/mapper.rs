@@ -53,6 +53,8 @@ pub struct Mapper {
     /// Направления, которые игрок отправил серверу и которые ещё не привели в новую комнату.
     /// Нужны, чтобы записать скрытый выход: сервер о нём в MSDP не скажет.
     pending_moves: VecDeque<Direction>,
+    /// С прошлого промпта игрок сменил комнату (иначе шаг не удался — см. `on_prompt`).
+    moved_since_prompt: bool,
     /// Ошибку записи показываем один раз, чтобы не засыпать экран.
     store_failed: bool,
 }
@@ -72,6 +74,7 @@ impl Mapper {
             store,
             walk: None,
             pending_moves: VecDeque::new(),
+            moved_since_prompt: false,
             store_failed: false,
         }
     }
@@ -95,6 +98,16 @@ impl Mapper {
         }
     }
 
+    /// Промпт: ответ сервера на очередную команду. Если с прошлого промпта комната
+    /// не сменилась, самый старый отправленный шаг не удался (стена, закрытая дверь) —
+    /// выбрасываем его, чтобы следующий удачный шаг не записался под чужим направлением.
+    pub fn on_prompt(&mut self) {
+        if !self.moved_since_prompt {
+            self.pending_moves.pop_front();
+        }
+        self.moved_since_prompt = false;
+    }
+
     /// Соединение закрылось.
     pub fn reset(&mut self) {
         self.walk = None;
@@ -113,22 +126,31 @@ impl Mapper {
         let moved = self.tracker.update(&info);
         let previous = self.tracker.previous();
         let result = self.map.update_from_msdp(info);
+        let mut changed = result.moved.clone();
 
         if moved {
+            self.moved_since_prompt = true;
             let step = self.pending_moves.pop_front();
-            if let (Some(dir), Some(prev)) = (step, previous) {
+            // Скрытый выход записываем, только если шаг однозначен: в очереди был один.
+            // Иначе непонятно, какая команда привела сюда, — лучше не записать, чем записать мусор.
+            if let (Some(dir), Some(prev), true) = (step, previous, self.pending_moves.is_empty()) {
                 self.learn_exit(prev, dir, vnum);
             }
+            // Старые карты могли слепить комнаты в одну клетку — разводим ту, где стоим.
+            changed.extend(self.map.separate(vnum));
         }
 
         if before.as_ref() != self.map.room(vnum) {
             self.save(vnum, &mut out);
         }
-        // Наложение комнат (`result.conflicts`) видно на карте; игрок поправит сам.
+        for other in changed.iter().filter(|v| **v != vnum) {
+            self.save(*other, &mut out);
+        }
         if moved {
             self.continue_walk(vnum, &mut out);
         }
-        if moved || result.created || before.as_ref() != self.map.room(vnum) {
+        if moved || result.created || !changed.is_empty() || before.as_ref() != self.map.room(vnum)
+        {
             out.extend(self.view().map(MapperEvent::View));
         }
         out
@@ -332,6 +354,73 @@ impl Mapper {
         out.extend(self.view().map(MapperEvent::View));
     }
 
+    /// `#map fix`: в текущей зоне развести слипшиеся комнаты и убрать сомнительные
+    /// скрытые выходы — те, что ведут туда же, куда видимый выход этой комнаты
+    /// (их записывала старая версия, путая шаги в стену с удачными).
+    fn fix_zone(&mut self, out: &mut Vec<MapperEvent>) {
+        let Some(zone) = self
+            .tracker
+            .current()
+            .and_then(|v| self.map.room(v))
+            .map(|r| r.zone)
+        else {
+            out.push(MapperEvent::Warning("не знаю, где вы".to_string()));
+            return;
+        };
+        let vnums: Vec<u32> = self
+            .map
+            .rooms()
+            .filter(|r| r.zone == zone)
+            .map(|r| r.vnum)
+            .collect();
+
+        let mut changed = std::collections::BTreeSet::new();
+        let mut removed_exits = 0;
+        for &vnum in &vnums {
+            let Some(room) = self.map.room(vnum) else {
+                continue;
+            };
+            let doubtful: Vec<Direction> = room
+                .exits
+                .iter()
+                .filter(|(_, e)| {
+                    e.hidden
+                        && e.to.is_some()
+                        && room.exits.values().any(|o| !o.hidden && o.to == e.to)
+                })
+                .map(|(d, _)| *d)
+                .collect();
+            for dir in doubtful {
+                let _ = self.map.remove_exit(vnum, dir);
+                removed_exits += 1;
+                changed.insert(vnum);
+            }
+        }
+        let mut separated = 0;
+        // Каждое разведение может создать новое наложение дальше — несколько проходов.
+        for _ in 0..5 {
+            let mut any = false;
+            for &vnum in &vnums {
+                let moved = self.map.separate(vnum);
+                if !moved.is_empty() {
+                    any = true;
+                    separated += 1;
+                    changed.extend(moved);
+                }
+            }
+            if !any {
+                break;
+            }
+        }
+        for vnum in changed {
+            self.save(vnum, out);
+        }
+        out.push(MapperEvent::Echo(format!(
+            "зона {zone}: разведено наложений {separated}, убрано сомнительных скрытых выходов {removed_exits}"
+        )));
+        out.extend(self.view().map(MapperEvent::View));
+    }
+
     fn map_command(&mut self, args: &[String], out: &mut Vec<MapperEvent>) {
         let sub = args.first().map(|s| s.to_lowercase()).unwrap_or_default();
         let rest = args.get(1..).unwrap_or_default().join(" ");
@@ -346,7 +435,8 @@ impl Mapper {
                     "Карта: комнат {}. Вы здесь: {here}.\n\
                      #go <номер|название> — идти, #stop — остановиться,\n\
                      #map find <название>, #map note <текст>, #map exit <направление> <номер>, \
-                     #map unexit <направление>",
+                     #map unexit <направление>,\n\
+                     #map move <направление> [клеток], #map fix — развести слипшиеся комнаты зоны",
                     self.map.len()
                 )));
             }
@@ -400,6 +490,33 @@ impl Mapper {
                 }
                 self.save(vnum, out);
                 out.push(MapperEvent::Echo("выход изменён".to_string()));
+                out.extend(self.view().map(MapperEvent::View));
+            }
+            "fix" => self.fix_zone(out),
+            "move" => {
+                let Some(vnum) = current else {
+                    out.push(MapperEvent::Warning("не знаю, где вы".to_string()));
+                    return;
+                };
+                let Some(dir) = args.get(1).and_then(|d| Direction::from_command(d)) else {
+                    out.push(MapperEvent::Warning(
+                        "#map move <направление> [сколько клеток]".to_string(),
+                    ));
+                    return;
+                };
+                let steps: i32 = args.get(2).and_then(|n| n.parse().ok()).unwrap_or(1);
+                let Some(room) = self.map.room(vnum) else {
+                    return;
+                };
+                let (dx, dy, dz) = dir.offset();
+                let (x, y, z) = (
+                    room.x + dx * steps,
+                    room.y + dy * steps,
+                    room.z + dz * steps,
+                );
+                let _ = self.map.move_room(vnum, x, y, z);
+                self.save(vnum, out);
+                out.push(MapperEvent::Echo("комната передвинута".to_string()));
                 out.extend(self.view().map(MapperEvent::View));
             }
             other => out.push(MapperEvent::Warning(format!(
@@ -520,5 +637,21 @@ mod tests {
         assert_eq!(out, [MapperEvent::Echo("остановился".into())]);
         let out = m.on_room(&room_msdp(101, &[("w", 100), ("n", 102)]));
         assert!(sent(&out).is_empty());
+    }
+
+    #[test]
+    fn шаг_в_стену_не_портит_выходы() {
+        let mut m = Mapper::default();
+        m.on_room(&room_msdp(100, &[("w", 101)]));
+        m.on_prompt();
+        m.note_sent("север"); // стена
+        m.on_prompt(); // «Вы не можете туда пройти» и промпт — комната не сменилась
+        m.note_sent("запад");
+        m.on_room(&room_msdp(101, &[]));
+        m.on_prompt();
+        let exits = &m.map().room(100).unwrap().exits;
+        assert!(!exits.contains_key(&Direction::North));
+        assert_eq!(exits[&Direction::West].to, Some(101));
+        assert!(!exits[&Direction::West].hidden);
     }
 }

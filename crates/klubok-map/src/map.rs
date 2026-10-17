@@ -34,6 +34,8 @@ pub struct UpdateResult {
     /// Заполняется только для новых комнат; конфликт не мешает добавлению,
     /// разрешать его будет игрок (или будущая автоматика).
     pub conflicts: Vec<u32>,
+    /// Комнаты, которые сдвинули, чтобы освободить место новой (их надо пересохранить).
+    pub moved: Vec<u32>,
 }
 
 /// Ошибки ручных правок карты.
@@ -127,9 +129,16 @@ impl Map {
         let mut result = UpdateResult::default();
 
         if !self.rooms.contains_key(&info.vnum) {
-            let (x, y, z) = self.place_new_room(&info);
+            let ((x, y, z), approach) = self.place_new_room(&info);
             result.created = true;
-            result.conflicts = self.rooms_at(x, y, z);
+            // Карты бывают «неровными»: по выходам в одну клетку приходят разные комнаты.
+            // Тогда раздвигаем зону по ходу движения, чтобы комнаты не слиплись.
+            if let Some(dir) = approach
+                && !self.zone_rooms_at(info.zone, x, y, z).is_empty()
+            {
+                result.moved = self.make_room_at(info.zone, (x, y, z), dir);
+            }
+            result.conflicts = self.zone_rooms_at(info.zone, x, y, z);
             let mut room = Room::new(info.vnum);
             room.x = x;
             room.y = y;
@@ -163,17 +172,19 @@ impl Map {
     }
 
     /// Выбрать координаты для новой комнаты (правила — в [`Map::update_from_msdp`]).
-    fn place_new_room(&self, info: &RoomInfo) -> (i32, i32, i32) {
+    /// Второе значение — направление, «откуда пришли» в эту клетку: в эту сторону
+    /// раздвигается зона, если клетка занята (`None` — остров, раздвигать некуда).
+    fn place_new_room(&self, info: &RoomInfo) -> ((i32, i32, i32), Option<Direction>) {
         if let Some(from) = info.from_room.and_then(|vnum| self.rooms.get(&vnum)) {
             // 1. Выход из прошлой комнаты, ведущий сюда.
             for (dir, exit) in &from.exits {
                 if exit.to == Some(info.vnum) {
-                    return shift(from.coords(), *dir, 1);
+                    return (shift(from.coords(), *dir, 1), Some(*dir));
                 }
             }
             // 2. Выход отсюда в прошлую комнату: мы стоим «напротив» него.
             if let Some(back) = info.from_direction {
-                return shift(from.coords(), back, -1);
+                return (shift(from.coords(), back, -1), Some(back.opposite()));
             }
         }
 
@@ -181,7 +192,7 @@ impl Map {
         for room in self.rooms.values() {
             for (dir, exit) in &room.exits {
                 if exit.to == Some(info.vnum) {
-                    return shift(room.coords(), *dir, 1);
+                    return (shift(room.coords(), *dir, 1), Some(*dir));
                 }
             }
         }
@@ -189,15 +200,101 @@ impl Map {
         // 4. Выход отсюда в известную комнату.
         for (dir, to) in &info.exits {
             if let Some(neighbour) = to.and_then(|vnum| self.rooms.get(&vnum)) {
-                return shift(neighbour.coords(), *dir, -1);
+                return (shift(neighbour.coords(), *dir, -1), Some(dir.opposite()));
             }
         }
 
         // 5. Остров правее всего, что уже есть.
-        match self.rooms.values().map(|room| room.x).max() {
+        let island = match self.rooms.values().map(|room| room.x).max() {
             Some(max_x) => (max_x + ISLAND_GAP, 0, 0),
             None => (0, 0, 0),
+        };
+        (island, None)
+    }
+
+    /// Комнаты зоны `zone` в точке `(x, y, z)`. Комнаты других зон не мешают:
+    /// карта рисуется по зонам.
+    pub fn zone_rooms_at(&self, zone: u32, x: i32, y: i32, z: i32) -> Vec<u32> {
+        self.rooms
+            .values()
+            .filter(|room| room.zone == zone && room.coords() == (x, y, z))
+            .map(|room| room.vnum)
+            .collect()
+    }
+
+    /// Освобождает клетку `at`: комнаты зоны, стоящие в ней, и все, что лежит строго
+    /// дальше по направлению `dir`, сдвигаются на шаг в ту же сторону. Комнаты на одной
+    /// линии с клеткой (поперёк направления) не трогаем — иначе связи с ними станут косыми. При сдвиге по
+    /// горизонтали трогаем только этот уровень. Возвращает сдвинутые комнаты.
+    pub fn make_room_at(&mut self, zone: u32, at: (i32, i32, i32), dir: Direction) -> Vec<u32> {
+        let (dx, dy, dz) = dir.offset();
+        let mut moved = Vec::new();
+        for room in self.rooms.values_mut() {
+            if room.zone != zone {
+                continue;
+            }
+            if dz == 0 && room.z != at.2 {
+                continue;
+            }
+            // Насколько комната «впереди» клетки по направлению сдвига (только одна ось ≠ 0).
+            let ahead = (room.x - at.0) * dx + (room.y - at.1) * dy + (room.z - at.2) * dz;
+            if ahead > 0 || room.coords() == at {
+                room.x += dx;
+                room.y += dy;
+                room.z += dz;
+                moved.push(room.vnum);
+            }
         }
+        moved
+    }
+
+    /// Разводит комнату `vnum` с теми, кто стоит в той же клетке её зоны.
+    ///
+    /// Направление ищется по соседу, из которого в комнату ведёт выход и который стоит
+    /// ровно в шаге от неё (или по выходу из неё в такого соседа). Комната остаётся на месте,
+    /// а остальные из клетки — вместе со всем, что дальше в эту сторону, — сдвигаются.
+    /// Возвращает сдвинутые комнаты (пусто — нечего разводить или не понятно, куда).
+    pub fn separate(&mut self, vnum: u32) -> Vec<u32> {
+        let Some(room) = self.rooms.get(&vnum) else {
+            return Vec::new();
+        };
+        let (cell, zone) = (room.coords(), room.zone);
+        if self.zone_rooms_at(zone, cell.0, cell.1, cell.2).len() < 2 {
+            return Vec::new();
+        }
+        let dir = self.approach_direction(vnum);
+        let Some(dir) = dir else {
+            return Vec::new();
+        };
+        // Вынимаем комнату, раздвигаем клетку и ставим её обратно.
+        let Some(room) = self.rooms.remove(&vnum) else {
+            return Vec::new();
+        };
+        let moved = self.make_room_at(zone, cell, dir);
+        self.rooms.insert(vnum, room);
+        moved
+    }
+
+    /// С какой стороны в комнату «входят» по карте: сосед в шаге, связанный выходом.
+    fn approach_direction(&self, vnum: u32) -> Option<Direction> {
+        let room = self.rooms.get(&vnum)?;
+        for other in self.rooms.values() {
+            if other.vnum == vnum || other.zone != room.zone {
+                continue;
+            }
+            for (dir, exit) in &other.exits {
+                if exit.to == Some(vnum) && shift(other.coords(), *dir, 1) == room.coords() {
+                    return Some(*dir);
+                }
+            }
+        }
+        for (dir, exit) in &room.exits {
+            let neighbour = exit.to.and_then(|to| self.rooms.get(&to))?;
+            if neighbour.zone == room.zone && shift(room.coords(), *dir, 1) == neighbour.coords() {
+                return Some(dir.opposite());
+            }
+        }
+        None
     }
 
     /// Задать заметку игрока.
@@ -338,12 +435,25 @@ mod tests {
         map.update_from_msdp(moved(info(103, &[(South, 104)]), 102, None));
         let result = map.update_from_msdp(moved(info(104, &[]), 103, None));
         assert!(result.created);
-        assert_eq!(result.conflicts, vec![100]);
+        // Клетка (0,0) занята комнатой 100 — зона раздвинулась вниз (на юг), 104 встала на место.
+        assert!(result.conflicts.is_empty());
+        assert_eq!(result.moved, vec![100]);
         assert_eq!(map.room(104).unwrap().coords(), (0, 0, 0));
+        assert_eq!(map.room(100).unwrap().coords(), (0, -1, 0));
+        // 101 стоит на одной линии с клеткой — её не трогаем.
+        assert_eq!(map.room(101).unwrap().coords(), (1, 0, 0));
+        assert_eq!(map.room(103).unwrap().coords(), (0, 1, 0));
 
-        let conflicts = map.move_room(104, 0, -1, 0).unwrap();
-        assert!(conflicts.is_empty());
-        assert_eq!(map.move_room(104, 1, 0, 0).unwrap(), vec![101]);
+        // Слепим 100 и 104 вручную (так выглядят старые карты).
+        assert_eq!(map.move_room(100, 0, 0, 0).unwrap(), vec![104]);
+        // 104 связана со 103 шагом на юг — она остаётся, остальное сдвигается на юг.
+        let moved = map.separate(104);
+        assert_eq!(moved, vec![100]);
+        assert_eq!(map.room(104).unwrap().coords(), (0, 0, 0));
+        assert_eq!(map.room(100).unwrap().coords(), (0, -1, 0));
+        assert_eq!(map.zone_rooms_at(1, 0, 0, 0), vec![104]);
+        // Больше разводить нечего.
+        assert!(map.separate(104).is_empty());
     }
 
     #[test]

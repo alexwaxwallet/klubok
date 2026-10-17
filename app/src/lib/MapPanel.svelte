@@ -44,11 +44,30 @@
   let here = $derived(byVnum.get(view.current));
   let onPath = $derived(new Set(view.path));
 
-  /** Экранные координаты комнаты (центр карты — текущая комната). */
+  /** Комнаты, которые стоят в одной клетке с другими: номер по порядку в клетке (0 — первая). */
+  let stacked = $derived.by(() => {
+    const seen = new Map<string, number>();
+    const order = new Map<number, number>();
+    for (const r of view.rooms) {
+      const key = `${r.x},${r.y}`;
+      const n = seen.get(key) ?? 0;
+      seen.set(key, n + 1);
+      order.set(r.vnum, n);
+    }
+    // Оставляем только клетки, где комнат больше одной.
+    for (const r of view.rooms) {
+      if ((seen.get(`${r.x},${r.y}`) ?? 0) < 2) order.delete(r.vnum);
+    }
+    return order;
+  });
+
+  /** Экранные координаты комнаты (центр карты — текущая комната).
+   *  Слипшиеся комнаты рисуются со сдвигом, чтобы было видно обе (`#map fix` разведёт). */
   function pos(r: MapRoom): [number, number] {
     const cx = here?.x ?? 0;
     const cy = here?.y ?? 0;
-    return [(r.x - cx) * s, -(r.y - cy) * s];
+    const k = (stacked.get(r.vnum) ?? 0) * 0.35;
+    return [(r.x - cx + k) * s, -(r.y - cy - k) * s];
   }
 
   interface Line {
@@ -100,6 +119,7 @@
     let t = `${r.name} [${r.vnum}]`;
     if (r.flags?.length) t += `\n${r.flags.map(flagName).join(", ")}`;
     if (r.note) t += `\n${r.note}`;
+    if (stacked.has(r.vnum)) t += "\nв одной клетке с другой комнатой — #map fix";
     return t;
   }
 
@@ -158,6 +178,7 @@
           class:path={onPath.has(r.vnum)}
           class:dt={r.flags?.includes("dt") || r.flags?.includes("flydt")}
           class:aggro={r.flags?.includes("aggro")}
+          class:stacked={stacked.has(r.vnum)}
           transform="translate({x} {y})"
           role="button"
           tabindex="-1"
@@ -261,6 +282,11 @@
 
   .room.dt rect {
     fill: var(--c1);
+  }
+
+  .room.stacked rect {
+    stroke: var(--danger);
+    stroke-dasharray: 2 2;
   }
 
   .room.path rect {
