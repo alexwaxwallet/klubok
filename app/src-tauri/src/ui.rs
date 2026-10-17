@@ -3,6 +3,7 @@
 //! Цвета превращаются в строки, понятные CSS: `"c0"`…`"c15"` — 16 стандартных цветов
 //! (их оттенки задаёт тема интерфейса), `"#rrggbb"` — всё остальное.
 
+use klubok_automation::{WindowOp, WindowShow};
 use klubok_core::{MapView, SessionOutput};
 use klubok_proto::{Color, MsdpValue, StyledLine};
 use serde::Serialize;
@@ -62,6 +63,24 @@ pub enum UiEvent {
     Bell,
     Hotkeys {
         hotkeys: Vec<UiHotkey>,
+    },
+    /// Строка в окно вывода (`#woutput`).
+    Woutput {
+        window: usize,
+        spans: Vec<UiSpan>,
+    },
+    /// Заголовок окна (`#wname`).
+    Wname {
+        window: usize,
+        name: String,
+    },
+    /// Показать/скрыть окно: `mode` — `toggle`, `show`, `hide`.
+    Wshow {
+        window: usize,
+        mode: &'static str,
+    },
+    Wclear {
+        window: usize,
     },
     /// Карта текущей зоны и уровня.
     Map {
@@ -168,6 +187,22 @@ impl UiEvent {
                     .collect(),
             }),
             SessionOutput::Map(view) => Some(map_event(view)),
+            SessionOutput::Window(op) => Some(match op {
+                WindowOp::Output { window, line } => UiEvent::Woutput {
+                    window,
+                    spans: spans(&line),
+                },
+                WindowOp::Name { window, name } => UiEvent::Wname { window, name },
+                WindowOp::Show { window, mode } => UiEvent::Wshow {
+                    window,
+                    mode: match mode {
+                        WindowShow::Toggle => "toggle",
+                        WindowShow::Show => "show",
+                        WindowShow::Hide => "hide",
+                    },
+                },
+                WindowOp::Clear { window } => UiEvent::Wclear { window },
+            }),
             SessionOutput::Disconnected => Some(UiEvent::Disconnected),
             // Сохранение настроек и отправка серверу обрабатываются до интерфейса.
             SessionOutput::AutomationChanged(_)

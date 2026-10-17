@@ -34,6 +34,27 @@
     d: { label: "↓", command: "вниз" },
   };
 
+  /** Цифровой блок без своих настроек ходит, как в JMC. */
+  const DEFAULT_HOTKEYS: Record<string, string> = {
+    NUM8: "север",
+    NUM2: "юг",
+    NUM4: "запад",
+    NUM6: "восток",
+    NUM9: "вверх",
+    NUM3: "вниз",
+    NUM5: "смотреть",
+  };
+
+  /** Сколько строк хранить в окне вывода. */
+  const WINDOW_SCROLLBACK = 500;
+
+  /** Окно вывода JMC (`#woutput`). */
+  interface OutWindow {
+    name: string;
+    lines: OutputLine[];
+    visible: boolean;
+  }
+
   interface Room {
     vnum: string;
     name: string;
@@ -54,7 +75,14 @@
   /** Открыт редактор автоматизации выбранного профиля. */
   let editingAutomation = $state(false);
   /** Горячие клавиши: каноническое имя (`Ctrl+NUM7`) → команды. */
-  let hotkeys = new Map<string, string>();
+  let hotkeys = new Map<string, string>(Object.entries(DEFAULT_HOTKEYS));
+  /** Окна вывода 0…9. */
+  let windows: OutWindow[] = $state(
+    Array.from({ length: 10 }, () => ({ name: "", lines: [], visible: false })),
+  );
+  let shownWindows = $derived(
+    windows.map((w, i) => ({ ...w, index: i })).filter((w) => w.visible),
+  );
   /** Режим #keytest: показывать, что пришло от каждой нажатой клавиши. */
   let keytest = false;
   /** До какого момента глушить ввод символа после Alt+цифровой блок (Alt-коды Windows). */
@@ -87,7 +115,7 @@
   }
 
   function setHotkeys(list: Hotkey[]) {
-    hotkeys = new Map();
+    hotkeys = new Map(Object.entries(DEFAULT_HOTKEYS));
     for (const h of list) {
       const name = normalizeSpec(h.key);
       if (!name) continue;
@@ -132,6 +160,24 @@
           break;
         case "map":
           mapView = event;
+          break;
+        case "woutput": {
+          const w = windows[event.window];
+          const all = w.lines.concat([{ id: nextId++, kind: "line", spans: event.spans }]);
+          w.lines = all.length > WINDOW_SCROLLBACK ? all.slice(-WINDOW_SCROLLBACK) : all;
+          w.visible = true;
+          break;
+        }
+        case "wname":
+          windows[event.window].name = event.name;
+          break;
+        case "wshow": {
+          const w = windows[event.window];
+          w.visible = event.mode === "toggle" ? !w.visible : event.mode === "show";
+          break;
+        }
+        case "wclear":
+          windows[event.window].lines = [];
           break;
         case "echo":
           add("echo", event.text);
@@ -360,22 +406,38 @@
       />
     </section>
 
-    {#if room}
-      <aside class="room">
-        <div class="room-name">{room.name}</div>
-        <div class="room-meta">[{room.vnum}] {room.area}</div>
-        <div class="exits">
-          {#each room.exits as exit (exit.dir)}
-            <button
-              class="exit"
-              title="{exit.dir} → {exit.vnum}"
-              onclick={() => submit(DIRECTIONS[exit.dir]?.command ?? exit.dir)}
-              >{DIRECTIONS[exit.dir]?.label ?? exit.dir}</button
-            >
-          {/each}
-        </div>
+    {#if room || mapView || shownWindows.length > 0}
+      <aside class="side">
+        {#if room}
+          <div class="room-name">{room.name}</div>
+          <div class="room-meta">[{room.vnum}] {room.area}</div>
+          <div class="exits">
+            {#each room.exits as exit (exit.dir)}
+              <button
+                class="exit"
+                title="{exit.dir} → {exit.vnum}"
+                onclick={() => submit(DIRECTIONS[exit.dir]?.command ?? exit.dir)}
+                >{DIRECTIONS[exit.dir]?.label ?? exit.dir}</button
+              >
+            {/each}
+          </div>
+        {/if}
+        {#each shownWindows as w (w.index)}
+          <section class="window">
+            <div class="window-bar">
+              <span>{w.name || `Окно ${w.index}`}</span>
+              <button title="Очистить" onclick={() => (windows[w.index].lines = [])}>⌫</button>
+              <button title="Скрыть (#wshow {w.index})" onclick={() => (windows[w.index].visible = false)}
+                >✕</button
+              >
+            </div>
+            <div class="window-body"><Output lines={w.lines} /></div>
+          </section>
+        {/each}
         {#if mapView}
           <MapPanel view={mapView} ongo={(vnum) => submit(`#go ${vnum}`)} />
+        {:else if room}
+          <p class="map-hint">Карта появится, когда сервер пришлёт комнату.</p>
         {/if}
       </aside>
     {/if}
@@ -478,7 +540,7 @@
     flex-direction: column;
   }
 
-  .room {
+  .side {
     width: 320px;
     padding: 12px;
     border-left: 1px solid var(--panel-border);
@@ -487,6 +549,51 @@
     flex-direction: column;
     gap: 8px;
     min-height: 0;
+  }
+
+  .window {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    background: var(--bg);
+    font-size: 13px;
+  }
+
+  .window-bar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    color: var(--muted);
+    font-size: 12px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .window-bar span {
+    flex: 1;
+  }
+
+  .window-bar button {
+    border: none;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  /* Высоту окна можно тянуть за нижний правый угол. */
+  .window-body {
+    height: 140px;
+    min-height: 60px;
+    resize: vertical;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .map-hint {
+    color: var(--muted);
+    font-size: 12px;
   }
 
   .room-name {
@@ -526,7 +633,7 @@
       flex-direction: column;
     }
 
-    .room {
+    .side {
       width: auto;
       border-left: none;
       border-top: 1px solid var(--panel-border);

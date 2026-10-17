@@ -41,6 +41,11 @@ pub async fn run_session(
     {
         return Ok(());
     }
+    for op in session.window_names() {
+        if events.send(SessionOutput::Window(op)).await.is_err() {
+            return Ok(());
+        }
+    }
     let mut buf = vec![0u8; 16 * 1024];
     // Когда показать незаконченную строку, если сервер так ничего и не допишет.
     let mut flush_at: Option<Instant> = None;

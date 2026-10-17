@@ -32,6 +32,16 @@
     }
   });
 
+  // Ширина поменялась (появилась боковая колонка, окно растянули) — строки
+  // переносятся иначе, и низ уезжает. Если были внизу — остаёмся внизу.
+  $effect(() => {
+    const observer = new ResizeObserver(() => {
+      if (stickToBottom) viewport.scrollTop = viewport.scrollHeight;
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  });
+
   function spanStyle(span: Span): string {
     const color = (c: string) => (c.startsWith("#") ? c : `var(--${c})`);
     let style = "";

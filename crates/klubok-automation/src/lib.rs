@@ -15,4 +15,6 @@ pub mod script;
 pub mod timers;
 
 pub use blank::{BlankLineFilter, BlankLineSettings};
-pub use engine::{Automation, CLIENT_COMMANDS, Effect, Hotkey, ImportReport};
+pub use engine::{
+    Automation, CLIENT_COMMANDS, Effect, Hotkey, ImportReport, WINDOWS, WindowOp, WindowShow,
+};

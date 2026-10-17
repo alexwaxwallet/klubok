@@ -30,6 +30,29 @@ const MAX_INSTANT_REPEATS: i64 = 10_000;
 pub const DEFAULT_GROUP: &str = "default";
 const DEFAULT_PRIORITY: i32 = 5;
 
+/// Сколько окон вывода, как в JMC: номера 0…9.
+pub const WINDOWS: usize = 10;
+
+/// Действие с окном вывода.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowOp {
+    /// Добавить строку в окно.
+    Output { window: usize, line: StyledLine },
+    /// Задать заголовок окна (`#wname`).
+    Name { window: usize, name: String },
+    /// Показать/скрыть окно (`#wshow N [show|hide|toggle]`).
+    Show { window: usize, mode: WindowShow },
+    /// Очистить окно (`#wclear`).
+    Clear { window: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowShow {
+    Toggle,
+    Show,
+    Hide,
+}
+
 /// Что должна сделать сессия.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -45,6 +68,8 @@ pub enum Effect {
     Disconnect,
     /// Настройки изменились — их стоит сохранить.
     Changed,
+    /// Окна вывода JMC (`#woutput`, `#wname`, `#wshow`, `#wclear`).
+    Window(WindowOp),
     /// Команда клиента вне автоматизации (карта: `#map`, `#go`) — её выполняет сессия.
     /// Аргументы уже с подставленными переменными.
     Client { name: String, args: Vec<String> },
@@ -118,6 +143,8 @@ pub struct Automation {
     pub highlights: Vec<Highlight>,
     pub hotkeys: Vec<Hotkey>,
     pub substitutions: Vec<Substitution>,
+    /// Заголовки окон вывода (`#wname`) — сохраняются в настройках.
+    pub window_names: BTreeMap<usize, String>,
     /// Склейка строк (`#merge`).
     pub merges: Vec<MergeRule>,
     merger: Merger,
@@ -610,12 +637,60 @@ impl Automation {
                     &self.variables,
                 )));
             }
-            "woutput" => {
-                // Отдельных окон вывода пока нет — показываем в основном.
-                fx.push(Effect::Echo(substitute_vars(
-                    &args[1..].join(" "),
-                    &self.variables,
-                )));
+            "woutput" | "wshow" | "wname" | "wclear" => {
+                // Номер окна 0…9, как в JMC.
+                let Some(window) = arg(0).trim().parse::<usize>().ok().filter(|n| *n < WINDOWS)
+                else {
+                    fx.push(Effect::Warning(format!(
+                        "#{name}: номер окна — от 0 до {}",
+                        WINDOWS - 1
+                    )));
+                    return;
+                };
+                let vars = &self.variables;
+                let op = match name.as_str() {
+                    "woutput" => {
+                        // `#woutput N {текст}` или `#woutput N {цвет} {текст}`.
+                        let (color, text) = match args.len() {
+                            0 | 1 => (None, String::new()),
+                            2 => (None, args[1].clone()),
+                            _ => (parse_highlight(&args[1]), args[2..].join(" ")),
+                        };
+                        let mut style = klubok_proto::Style::default();
+                        if let Some(color) = color {
+                            color.apply(&mut style);
+                        }
+                        let mut line = StyledLine::default();
+                        line.push(&substitute_vars(&text, vars), style);
+                        WindowOp::Output { window, line }
+                    }
+                    "wname" => {
+                        let title = substitute_vars(&args[1..].join(" "), vars);
+                        if title.is_empty() {
+                            self.window_names.remove(&window);
+                        } else {
+                            self.window_names.insert(window, title.clone());
+                        }
+                        fx.push(Effect::Changed);
+                        WindowOp::Name {
+                            window,
+                            name: title,
+                        }
+                    }
+                    "wshow" => {
+                        let mode = arg(1).to_lowercase();
+                        let mode = if mode.is_empty() || "toggle".starts_with(&mode) {
+                            WindowShow::Toggle
+                        } else if "hide".starts_with(&mode) {
+                            WindowShow::Hide
+                        } else {
+                            WindowShow::Show
+                        };
+                        WindowOp::Show { window, mode }
+                    }
+                    _ => WindowOp::Clear { window },
+                };
+                fx.push(Effect::Window(op));
             }
             "bell" => fx.push(Effect::Bell),
             "zap" => fx.push(Effect::Disconnect),
@@ -1185,6 +1260,13 @@ impl Automation {
                     self.set_substitution(&args[0], Some(&args[1]), args.get(2));
                     report.substitutions += 1;
                 }
+                "wname" if args.len() >= 2 => {
+                    if let Ok(n) = args[0].trim().parse::<usize>()
+                        && n < WINDOWS
+                    {
+                        self.window_names.insert(n, args[1..].join(" "));
+                    }
+                }
                 "merge" if args.len() >= 2 => {
                     self.set_merge(&args[0], &args[1], args.get(2), args.get(3));
                     report.substitutions += 1;
@@ -1287,6 +1369,9 @@ impl Automation {
                     braced(&s.group)
                 )),
             }
+        }
+        for (n, title) in &self.window_names {
+            line(format!("#wname {n} {}", braced(title)));
         }
         for m in &self.merges {
             line(format!(
@@ -1447,6 +1532,9 @@ const SUPPORTED: &[&str] = &[
     "output",
     "showme",
     "woutput",
+    "wshow",
+    "wname",
+    "wclear",
     "bell",
     "zap",
     // скрипты

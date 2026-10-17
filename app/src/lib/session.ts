@@ -35,6 +35,10 @@ export type SessionEvent =
   | { type: "bell" }
   | { type: "hotkeys"; hotkeys: Hotkey[] }
   | ({ type: "map" } & MapView)
+  | { type: "woutput"; window: number; spans: Span[] }
+  | { type: "wname"; window: number; name: string }
+  | { type: "wshow"; window: number; mode: "toggle" | "show" | "hide" }
+  | { type: "wclear"; window: number }
   | { type: "disconnected" };
 
 export interface MapExit {

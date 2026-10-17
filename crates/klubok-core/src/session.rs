@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use klubok_automation::{Automation, BlankLineFilter, BlankLineSettings, Effect, Hotkey};
+use klubok_automation::{Automation, BlankLineFilter, BlankLineSettings, Effect, Hotkey, WindowOp};
 use klubok_proto::telnet::{self, opt};
 use klubok_proto::{
     AnsiParser, Charset, InputDecoder, LineAssembler, MsdpValue, RawLine, StyledLine, TelnetEvent,
@@ -88,6 +88,8 @@ pub enum SessionOutput {
     HotkeysChanged(Vec<Hotkey>),
     /// Карта вокруг игрока (текущая зона и уровень).
     Map(MapView),
+    /// Окно вывода (`#woutput` и др.).
+    Window(WindowOp),
     /// Нужно разорвать соединение (`#zap`).
     CloseRequested,
     Disconnected,
@@ -106,6 +108,10 @@ pub struct Session {
     mapper: Mapper,
     /// Время от начала сессии (сообщает сетевой цикл через `set_now`).
     now: Duration,
+    /// Сервер согласился на MSDP.
+    msdp_active: bool,
+    /// Комнату уже запросили после входа в игру (см. `request_room`).
+    room_requested: bool,
 }
 
 impl Session {
@@ -119,6 +125,8 @@ impl Session {
             charset_selected: !config.auto_charset,
             mapper: Mapper::default(),
             now: Duration::ZERO,
+            msdp_active: false,
+            room_requested: false,
             automation,
             config,
         }
@@ -144,6 +152,18 @@ impl Session {
     /// Когда (от начала сессии) прислать `SessionInput::Timers`.
     pub fn next_deadline(&self) -> Option<Duration> {
         self.automation.next_deadline()
+    }
+
+    /// Заголовки окон вывода из настроек — интерфейсу при подключении.
+    pub fn window_names(&self) -> Vec<WindowOp> {
+        self.automation
+            .window_names
+            .iter()
+            .map(|(window, name)| WindowOp::Name {
+                window: *window,
+                name: name.clone(),
+            })
+            .collect()
     }
 
     pub fn hotkeys(&self) -> Vec<Hotkey> {
@@ -209,6 +229,7 @@ impl Session {
                 Effect::Echo(text) => out.push(SessionOutput::Echo(text)),
                 Effect::Warning(text) => out.push(SessionOutput::Warning(text)),
                 Effect::Bell => out.push(SessionOutput::Bell),
+                Effect::Window(op) => out.push(SessionOutput::Window(op)),
                 Effect::Disconnect => out.push(SessionOutput::CloseRequested),
                 Effect::Client { name, .. } if name == "connect" => {
                     out.push(SessionOutput::Echo(
@@ -295,6 +316,7 @@ impl Session {
             (Verb::Will, opt::MSDP) if self.config.msdp => {
                 out.push(SessionOutput::Send(telnet::negotiate(Verb::Do, opt::MSDP)));
                 out.push(SessionOutput::Send(msdp::report("ROOM")));
+                self.msdp_active = true;
                 out.push(SessionOutput::Info(
                     "MSDP включён, подписка на ROOM".to_string(),
                 ));
@@ -337,6 +359,9 @@ impl Session {
             for held in self.blank.prompt() {
                 out.push(SessionOutput::Line(held));
             }
+            if !logging_in {
+                self.request_room(&text, out);
+            }
             out.push(SessionOutput::Prompt(line));
             self.apply_effects(effects, out);
         } else if logging_in {
@@ -359,6 +384,20 @@ impl Session {
         }
         // Команды триггеров отправляются после показа строки, которая их вызвала.
         self.apply_effects(effects, out);
+    }
+
+    /// После входа (и переподключения) сервер не присылает комнату, пока игрок не шагнёт
+    /// или не посмотрит. Чтобы карта появилась сразу, на первом игровом промпте просим
+    /// MSDP `SEND ROOM`.
+    ///
+    /// Только на игровом промпте (кончается на `>`): до входа персонажа у сервера нет
+    /// персонажа, и запрос комнаты там опасен для сервера.
+    fn request_room(&mut self, prompt: &str, out: &mut Vec<SessionOutput>) {
+        if self.room_requested || !self.msdp_active || !prompt.trim_end().ends_with('>') {
+            return;
+        }
+        self.room_requested = true;
+        out.push(SessionOutput::Send(msdp::send("ROOM")));
     }
 
     fn run_login(&mut self, text: &str, out: &mut Vec<SessionOutput>) {
@@ -589,5 +628,56 @@ mod tests {
         s.set_now(Duration::from_secs(12));
         let out = s.handle(SessionInput::Timers).unwrap();
         assert_eq!(sent(&out), ["см\r\n".as_bytes().to_vec()]);
+    }
+
+    #[test]
+    fn комната_запрашивается_на_первом_игровом_промпте() {
+        let config = SessionConfig {
+            auto_charset: false,
+            ..SessionConfig::default()
+        };
+        let mut s = session(config);
+        // Без MSDP не просим.
+        let out = feed(&mut s, b"20H> \xff\xf9");
+        assert!(!sent(&out).contains(&msdp::send("ROOM")));
+        feed(&mut s, b"\xff\xfbE");
+        // Промпт не игровой (вход) — не просим.
+        let out = feed(&mut s, "Введите имя: ".as_bytes());
+        assert!(sent(&out).is_empty());
+        let out = feed(&mut s, b"\xff\xf9");
+        assert!(!sent(&out).contains(&msdp::send("ROOM")));
+        let out = feed(&mut s, b"500H 82M> \xff\xf9");
+        assert_eq!(sent(&out), vec![msdp::send("ROOM")]);
+        // Второй раз — нет.
+        let out = feed(&mut s, b"500H 82M> \xff\xf9");
+        assert!(sent(&out).is_empty());
+    }
+
+    #[test]
+    fn окно_вывода_из_триггера() {
+        let mut automation = Automation::new();
+        automation.import("#action {^%0 сказал вам : '%1'} {#woutput 1 {light green} {%0: %1}}\n#wname 1 {Болтовня}");
+        let config = SessionConfig {
+            auto_charset: false,
+            ..SessionConfig::default()
+        };
+        let mut s = Session::new(config, automation);
+        assert_eq!(
+            s.window_names(),
+            [WindowOp::Name {
+                window: 1,
+                name: "Болтовня".into()
+            }]
+        );
+        let out = feed(&mut s, "Петя сказал вам : 'привет'\r\n".as_bytes());
+        let line = out
+            .iter()
+            .find_map(|o| match o {
+                SessionOutput::Window(WindowOp::Output { window: 1, line }) => Some(line.clone()),
+                _ => None,
+            })
+            .expect("строка в окне 1");
+        assert_eq!(line.text(), "Петя: привет");
+        assert_ne!(line.spans[0].style, klubok_proto::Style::default());
     }
 }
