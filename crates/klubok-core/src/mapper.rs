@@ -111,6 +111,31 @@ impl Mapper {
         self.tracker.current()
     }
 
+    /// Строка от сервера. Сервер не сообщает в MSDP, что комната мирная, поэтому узнаём по
+    /// тексту: «счет» («Тут вы чувствуете себя в безопасности.») или отказ начать драку.
+    pub fn on_line(&mut self, text: &str) -> Vec<MapperEvent> {
+        let mut out = Vec::new();
+        if !PEACE_MARKERS.iter().any(|m| text.contains(m)) {
+            return out;
+        }
+        let Some(vnum) = self.tracker.current() else {
+            return out;
+        };
+        let already = self
+            .map
+            .room(vnum)
+            .is_none_or(|r| r.flags.iter().any(|f| f == "peace"));
+        if already {
+            return out;
+        }
+        if self.map.set_flag(vnum, "peace", true).is_ok() {
+            self.save(vnum, &mut out);
+            out.push(MapperEvent::Echo("комната отмечена как мирная".to_string()));
+            out.extend(self.view().map(MapperEvent::View));
+        }
+        out
+    }
+
     /// Игрок (или триггер) отправил команду серверу. Если это шаг — запоминаем направление.
     pub fn note_sent(&mut self, command: &str) {
         if let Some(dir) = Direction::from_command(command.trim()) {
@@ -642,6 +667,13 @@ fn room_info(value: &MsdpValue) -> Option<RoomInfo> {
     })
 }
 
+/// Строки сервера, по которым видно, что комната мирная.
+const PEACE_MARKERS: &[&str] = &[
+    "Тут вы чувствуете себя в безопасности",
+    "Здесь слишком мирно",
+    "находясь в тишине и покое",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,5 +800,18 @@ mod tests {
             (room.color.as_str(), room.flags.as_slice()),
             ("#ffff00", &["dt".to_string()][..])
         );
+    }
+
+    #[test]
+    fn мирная_комната_по_тексту() {
+        let mut m = Mapper::new(Map::new(), None);
+        assert!(m.on_line("Тут вы чувствуете себя в безопасности.").is_empty()); // ещё нигде
+        m.on_room(&room_msdp(100, &[]));
+        assert!(m.on_line("Вы голодны.").is_empty());
+        let events = m.on_line("Тут вы чувствуете себя в безопасности.");
+        assert!(events.iter().any(|e| matches!(e, MapperEvent::Echo(_))));
+        assert!(m.map.room(100).unwrap().flags.contains(&"peace".to_string()));
+        // Второй раз молчим.
+        assert!(m.on_line("Здесь слишком мирно, чтобы начинать драку.").is_empty());
     }
 }

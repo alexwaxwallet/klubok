@@ -31,6 +31,7 @@
     { flag: "flydt", icon: "☁", title: "ДТ, если не летать" },
     { flag: "aggro", icon: "⚔", title: "Агрессивные мобы" },
     { flag: "nostep", icon: "✕", title: "Сюда не ходить" },
+    { flag: "peace", icon: "☮", title: "Мирная комната" },
   ];
 
   let width = $state(300);
@@ -281,7 +282,8 @@
   }
 
   function key(e: KeyboardEvent) {
-    if (!editing) return;
+    // Цифровой блок — горячие клавиши (ходьба), карта его не трогает.
+    if (!editing || e.location === 3) return;
     const arrows: Record<string, [number, number]> = {
       ArrowLeft: [-1, 0],
       ArrowRight: [1, 0],
@@ -294,7 +296,7 @@
       deleteSelected();
     } else if (e.key === "Escape") {
       selected = new Set();
-    } else if (e.key === "a" && e.ctrlKey) {
+    } else if (e.code === "KeyA" && e.ctrlKey) {
       selected = new Set(view.rooms.map((r) => r.vnum));
     } else {
       return;

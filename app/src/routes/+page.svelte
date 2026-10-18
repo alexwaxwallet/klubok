@@ -46,6 +46,9 @@
     NUM5: "смотреть",
   };
 
+  /** Клавиши, которые панель карты забирает себе в режиме правки. */
+  const MAP_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Delete", "Escape", "a", "A", "ф", "Ф"]);
+
   /** Сколько строк хранить в окне вывода. */
   const WINDOW_SCROLLBACK = 500;
 
@@ -292,8 +295,15 @@
   /** Горячие клавиши проверяются до поля ввода, чтобы цифровой блок не печатал цифры. */
   function onKeydownCapture(event: KeyboardEvent) {
     if (editing !== undefined || editingAutomation) return;
-    // Карта в режиме правки сама ловит стрелки и Delete.
-    if ((event.target as HTMLElement).closest?.("[data-no-hotkeys]")) return;
+    // Карта в режиме правки сама ловит стрелки, Delete, Esc и Ctrl+A — но не цифровой блок:
+    // он всегда остаётся горячими клавишами (иначе цифра уходит в строку ввода).
+    if (
+      event.location !== 3 &&
+      MAP_KEYS.has(event.key) &&
+      (event.target as HTMLElement).closest?.("[data-no-hotkeys]")
+    ) {
+      return;
+    }
     const name = eventKeyName(event);
     if (keytest && name !== null) {
       const bound = hotkeys.get(name);
@@ -332,6 +342,8 @@
     const target = event.target as HTMLElement;
     if (target.closest("input, select, button, textarea")) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    // Цифровой блок вне строки ввода — только горячие клавиши, цифры в строку не печатаем.
+    if (event.location === 3) return;
     if (event.key.length === 1 || event.key === "Enter" || event.key.startsWith("Arrow")) {
       commandInput.focus();
     }

@@ -374,6 +374,9 @@ impl Session {
         } else if logging_in {
             self.show_line(line, true, out);
         } else {
+            // Маппер видит исходную строку (до склейки и замен).
+            let events = self.mapper.on_line(&text);
+            self.apply_mapper(events, out);
             for line in self.automation.merge_line(line) {
                 self.show_line(line, false, out);
             }
