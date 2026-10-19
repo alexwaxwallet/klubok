@@ -21,7 +21,10 @@ pub struct MapView {
     pub current: u32,
     pub zone: u32,
     pub area: String,
+    /// Показанный уровень (игрок может смотреть выше/ниже себя).
     pub z: i32,
+    /// Уровень, на котором стоит игрок.
+    pub own_z: i32,
     pub rooms: Vec<Room>,
     /// Комнаты оставшегося пути `#go` — для подсветки.
     pub path: Vec<u32>,
@@ -49,6 +52,9 @@ pub enum MapEdit {
         flag: String,
         on: bool,
     },
+    /// Посмотреть на уровень выше/ниже (`dz` = ±1); `dz` = 0 — вернуться на свой уровень.
+    /// Карта не меняется; при переходе в другую комнату вид возвращается к игроку.
+    Level { dz: i32 },
 }
 
 /// Что маппер просит сделать сессию.
@@ -81,6 +87,8 @@ pub struct Mapper {
     moved_since_prompt: bool,
     /// Ошибку записи показываем один раз, чтобы не засыпать экран.
     store_failed: bool,
+    /// На сколько уровней выше (+) или ниже (−) игрока смотрит панель карты.
+    look_dz: i32,
 }
 
 impl Default for Mapper {
@@ -100,6 +108,7 @@ impl Mapper {
             pending_moves: VecDeque::new(),
             moved_since_prompt: false,
             store_failed: false,
+            look_dz: 0,
         }
     }
 
@@ -179,6 +188,7 @@ impl Mapper {
 
         if moved {
             self.moved_since_prompt = true;
+            self.look_dz = 0;
             let step = self.pending_moves.pop_front();
             // Скрытый выход записываем, только если шаг однозначен: в очереди был один.
             // Иначе непонятно, какая команда привела сюда, — лучше не записать, чем записать мусор.
@@ -250,10 +260,11 @@ impl Mapper {
     pub fn view(&self) -> Option<MapView> {
         let current = self.tracker.current()?;
         let here = self.map.room(current)?;
+        let z = here.z + self.look_dz;
         let rooms = self
             .map
             .rooms()
-            .filter(|r| r.zone == here.zone && r.z == here.z)
+            .filter(|r| r.zone == here.zone && r.z == z)
             .cloned()
             .collect();
         let path = self
@@ -265,7 +276,8 @@ impl Mapper {
             current,
             zone: here.zone,
             area: here.area.clone(),
-            z: here.z,
+            z,
+            own_z: here.z,
             rooms,
             path,
         })
@@ -386,6 +398,9 @@ impl Mapper {
                         self.save(vnum, &mut out);
                     }
                 }
+            }
+            MapEdit::Level { dz } => {
+                self.look_dz = if dz == 0 { 0 } else { self.look_dz + dz };
             }
         }
         out.extend(self.view().map(MapperEvent::View));
@@ -814,4 +829,30 @@ mod tests {
         // Второй раз молчим.
         assert!(m.on_line("Здесь слишком мирно, чтобы начинать драку.").is_empty());
     }
+
+    #[test]
+    fn просмотр_другого_уровня() {
+        let mut m = Mapper::new(Map::new(), None);
+        walked(&mut m);
+        let view = |events: Vec<MapperEvent>| {
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    MapperEvent::View(v) => Some(v),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let v = view(m.edit(MapEdit::Level { dz: 1 }));
+        assert_eq!((v.z, v.own_z), (1, 0));
+        assert!(v.rooms.is_empty());
+        let v = view(m.edit(MapEdit::Level { dz: 0 }));
+        assert_eq!(v.z, 0);
+        assert_eq!(v.rooms.len(), 3);
+        // Шаг в другую комнату возвращает вид к игроку.
+        m.edit(MapEdit::Level { dz: -1 });
+        let v = view(m.on_room(&room_msdp(101, &[("w", 100), ("n", 102)])));
+        assert_eq!(v.z, 0);
+    }
 }
+

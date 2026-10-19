@@ -60,16 +60,16 @@ impl Direction {
         }
     }
 
-    /// Разбор русской команды движения: полной («север») или короткой («с»).
+    /// Разбор команды движения: русской полной («север») или короткой («с»), либо английской («n», «north»).
     /// Регистр и пробелы по краям не важны.
     pub fn from_command(command: &str) -> Option<Direction> {
         match command.trim().to_lowercase().as_str() {
-            "север" | "с" => Some(Direction::North),
-            "восток" | "в" => Some(Direction::East),
-            "юг" | "ю" => Some(Direction::South),
-            "запад" | "з" => Some(Direction::West),
-            "вверх" | "вв" => Some(Direction::Up),
-            "вниз" | "вн" => Some(Direction::Down),
+            "север" | "с" | "n" | "north" => Some(Direction::North),
+            "восток" | "в" | "e" | "east" => Some(Direction::East),
+            "юг" | "ю" | "s" | "south" => Some(Direction::South),
+            "запад" | "з" | "w" | "west" => Some(Direction::West),
+            "вверх" | "вв" | "u" | "up" => Some(Direction::Up),
+            "вниз" | "вн" | "d" | "down" => Some(Direction::Down),
             _ => None,
         }
     }

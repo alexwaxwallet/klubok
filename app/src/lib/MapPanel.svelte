@@ -72,6 +72,12 @@
     }
   }
 
+  /** ◎: центр на игроке и его уровень. */
+  function toMe() {
+    pan = { x: 0, y: 0 };
+    if (view.z !== view.own_z) onedit({ type: "level", dz: 0 });
+  }
+
   function setZoom(z: number) {
     zoom = Math.min(3, Math.max(0.4, z));
     try {
@@ -315,10 +321,12 @@
 <div class="map" onkeydown={key} data-no-hotkeys={editing ? "" : undefined}>
   <div class="bar">
     <span class="area" title="зона {view.zone}">{view.area || `зона ${view.zone}`}</span>
-    <span class="level">ур. {view.z}</span>
+    <button title="Посмотреть уровень ниже" onclick={() => onedit({ type: "level", dz: -1 })}>▼</button>
+    <span class="level" class:away={view.z !== view.own_z} title={view.z !== view.own_z ? `вы на уровне ${view.own_z}` : "ваш уровень"}>ур. {view.z}</span>
+    <button title="Посмотреть уровень выше" onclick={() => onedit({ type: "level", dz: 1 })}>▲</button>
     <button title="Мельче" onclick={() => setZoom(zoom / 1.25)}>−</button>
     <button title="Крупнее" onclick={() => setZoom(zoom * 1.25)}>+</button>
-    <button title="К себе" onclick={() => (pan = { x: 0, y: 0 })}>◎</button>
+    <button title="К себе" onclick={toMe}>◎</button>
     <button class:on={editing} title="Правка карты" onclick={toggleEditing}>✎</button>
   </div>
   {#if editing}
@@ -458,6 +466,13 @@
     height: 0;
   }
 
+  .level {
+    white-space: nowrap;
+  }
+  .level.away {
+    color: var(--accent);
+    font-weight: 600;
+  }
   .area {
     flex: 1;
     min-width: 0;

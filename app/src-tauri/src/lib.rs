@@ -370,6 +370,7 @@ fn connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(),
         charset,
         blank_lines: profile.blank_lines,
         login,
+        log_dir: Some(state.data_dir.join("logs")),
         ..SessionConfig::default()
     };
 

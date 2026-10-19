@@ -67,7 +67,10 @@ export interface MapView {
   current: number;
   zone: number;
   area: string;
+  /** Показанный уровень. */
   z: number;
+  /** Уровень игрока. */
+  own_z: number;
   rooms: MapRoom[];
   /** Оставшийся путь `#go`. */
   path: number[];
@@ -78,7 +81,8 @@ export type MapEdit =
   | { type: "move"; rooms: number[]; dx: number; dy: number; dz: number }
   | { type: "delete"; rooms: number[] }
   | { type: "color"; rooms: number[]; color: string }
-  | { type: "flag"; rooms: number[]; flag: string; on: boolean };
+  | { type: "flag"; rooms: number[]; flag: string; on: boolean }
+  | { type: "level"; dz: number };
 
 export function mapEdit(edit: MapEdit): Promise<void> {
   return invoke("map_edit", { edit });

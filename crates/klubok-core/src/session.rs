@@ -4,6 +4,7 @@
 //! она возвращает список `SessionOutput`. Поэтому её легко тестировать,
 //! просто подавая байты. Сеть и таймеры — в `net.rs`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use klubok_automation::{Automation, BlankLineFilter, BlankLineSettings, Effect, Hotkey, WindowOp};
@@ -29,6 +30,8 @@ pub struct SessionConfig {
     pub blank_lines: BlankLineSettings,
     /// Имя и пароль для автовхода.
     pub login: Option<Credentials>,
+    /// Папка для логов `#log` с относительным именем файла (`None` — текущая папка).
+    pub log_dir: Option<PathBuf>,
 }
 
 impl Default for SessionConfig {
@@ -40,6 +43,7 @@ impl Default for SessionConfig {
             msdp: true,
             blank_lines: BlankLineSettings::default(),
             login: None,
+            log_dir: None,
         }
     }
 }
@@ -92,9 +96,19 @@ pub enum SessionOutput {
     Map(MapView),
     /// Окно вывода (`#woutput` и др.).
     Window(WindowOp),
+    /// Начать или остановить лог сессии (`#log`) — файлом занимается сетевой цикл.
+    Log(LogOp),
     /// Нужно разорвать соединение (`#zap`).
     CloseRequested,
     Disconnected,
+}
+
+/// Что сделать с логом сессии.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogOp {
+    /// Писать показанный текст в файл; `append` — дописывать, иначе начать заново.
+    Start { path: PathBuf, append: bool },
+    Stop,
 }
 
 pub struct Session {
@@ -237,6 +251,7 @@ impl Session {
                 Effect::Bell => out.push(SessionOutput::Bell),
                 Effect::Window(op) => out.push(SessionOutput::Window(op)),
                 Effect::Disconnect => out.push(SessionOutput::CloseRequested),
+                Effect::Client { name, args } if name == "log" => self.log_command(&args, out),
                 Effect::Client { name, .. } if name == "connect" => {
                     out.push(SessionOutput::Echo(
                         "#connect: уже подключены (переподключение — кнопкой вверху)".to_string(),
@@ -256,6 +271,24 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// `#log {файл} {append|overwrite}`; без файла — остановить. Относительное имя — в папке логов.
+    fn log_command(&mut self, args: &[String], out: &mut Vec<SessionOutput>) {
+        let file = args.first().map(|a| a.trim()).unwrap_or_default();
+        if file.is_empty() {
+            out.push(SessionOutput::Log(LogOp::Stop));
+            return;
+        }
+        let mode = args.get(1).map(|a| a.trim().to_lowercase()).unwrap_or_default();
+        let append = !mode.starts_with('o') && !mode.starts_with("пере");
+        let mut path = PathBuf::from(file);
+        if path.is_relative()
+            && let Some(dir) = &self.config.log_dir
+        {
+            path = dir.join(path);
+        }
+        out.push(SessionOutput::Log(LogOp::Start { path, append }));
     }
 
     /// Команда серверу: маппер запоминает шаги, чтобы узнать скрытые выходы.
@@ -690,4 +723,34 @@ mod tests {
         assert_eq!(line.text(), "Петя: привет");
         assert_ne!(line.spans[0].style, klubok_proto::Style::default());
     }
+
+    #[test]
+    fn log_относительный_путь_в_папке_логов() {
+        let config = SessionConfig {
+            log_dir: Some(PathBuf::from("данные/logs")),
+            ..SessionConfig::default()
+        };
+        let mut s = session(config);
+        let logs = |out: Vec<SessionOutput>| -> Vec<LogOp> {
+            out.into_iter()
+                .filter_map(|o| match o {
+                    SessionOutput::Log(op) => Some(op),
+                    _ => None,
+                })
+                .collect()
+        };
+        let out = s.handle(SessionInput::UserCommand("#log {бой.txt}".into())).unwrap();
+        assert_eq!(
+            logs(out),
+            vec![LogOp::Start {
+                path: PathBuf::from("данные/logs/бой.txt"),
+                append: true
+            }]
+        );
+        let out = s.handle(SessionInput::UserCommand("#log x.txt overwrite".into())).unwrap();
+        assert!(matches!(&logs(out)[0], LogOp::Start { append: false, .. }));
+        let out = s.handle(SessionInput::UserCommand("#log".into())).unwrap();
+        assert_eq!(logs(out), vec![LogOp::Stop]);
+    }
 }
+

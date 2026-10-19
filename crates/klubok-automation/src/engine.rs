@@ -77,7 +77,8 @@ pub enum Effect {
 
 /// Команды, которые автоматизация не выполняет сама, а передаёт сессии ([`Effect::Client`]).
 /// `connect` — `#connect адрес порт` (в JMC чаще пишут сокращённо: `#con localhost 2000`).
-pub const CLIENT_COMMANDS: &[&str] = &["map", "go", "stop", "connect"];
+/// `log` — `#log {файл} {append|overwrite}` (без аргументов — остановить), пишет сеть.
+pub const CLIENT_COMMANDS: &[&str] = &["map", "go", "stop", "connect", "log"];
 
 #[derive(Debug, Clone)]
 pub struct Alias {
@@ -156,6 +157,8 @@ pub struct Automation {
     warned: BTreeSet<String>,
     /// Тикер JMC (`#tickon`, `#tickset`, `#ticksize`).
     pub ticker: Ticker,
+    /// `#speedwalk on`: строка вида `3n2e` разворачивается в шаги.
+    pub speedwalk: bool,
 
     // ── время ──
     /// «Сейчас» — время от начала сессии, которое сообщила сессия (`set_now`/`tick`).
@@ -192,7 +195,6 @@ const SETTING_COMMANDS: &[&str] = &[
     "presub",
     "echo",
     "ignore",
-    "speedwalk",
     "togglesubs",
     "verbat",
     "verbatim",
@@ -394,7 +396,13 @@ impl Automation {
                 let body = substitute_params(&alias.body, &params);
                 self.run(&body, depth + 1, fx);
             }
-            None => fx.push(Effect::Send(substitute_vars(command, &self.variables))),
+            None => {
+                let command = substitute_vars(command, &self.variables);
+                match self.speedwalk.then(|| expand_speedwalk(&command)).flatten() {
+                    Some(steps) => fx.extend(steps.into_iter().map(Effect::Send)),
+                    None => fx.push(Effect::Send(command)),
+                }
+            }
         }
     }
 
@@ -429,6 +437,23 @@ impl Automation {
                         "#Тикер ВКЛЮЧЕН."
                     } else {
                         "#Тикер ВЫКЛЮЧЕН."
+                    }
+                    .to_string(),
+                ));
+                fx.push(Effect::Changed);
+            }
+            "speedwalk" => {
+                // Без аргумента — переключить, как в JMC.
+                self.speedwalk = match var_arg(0).trim().to_lowercase().as_str() {
+                    "on" | "вкл" => true,
+                    "off" | "выкл" => false,
+                    _ => !self.speedwalk,
+                };
+                fx.push(Effect::Echo(
+                    if self.speedwalk {
+                        "#Speedwalk включён."
+                    } else {
+                        "#Speedwalk выключен."
                     }
                     .to_string(),
                 ));
@@ -1267,6 +1292,9 @@ impl Automation {
                         self.window_names.insert(n, args[1..].join(" "));
                     }
                 }
+                "speedwalk" => {
+                    self.speedwalk = arg(0).trim().eq_ignore_ascii_case("on");
+                }
                 "merge" if args.len() >= 2 => {
                     self.set_merge(&args[0], &args[1], args.get(2), args.get(3));
                     report.substitutions += 1;
@@ -1317,6 +1345,9 @@ impl Automation {
         }
         if self.ticker.enabled {
             line("#tickon".to_string());
+        }
+        if self.speedwalk {
+            line("#speedwalk on".to_string());
         }
         for (name, value) in &self.variables {
             line(format!("#variable {} {}", braced(name), braced(value)));
@@ -1537,6 +1568,7 @@ const SUPPORTED: &[&str] = &[
     "wclear",
     "bell",
     "zap",
+    "speedwalk",
     // скрипты
     "scriptlet",
     "script",
@@ -1703,6 +1735,38 @@ fn is_known_command(name: &str) -> bool {
 
 /// Полное имя команды: известные имена — как есть, иначе сокращение по правилам JMC.
 /// `#5:10` (цикл) и неизвестное — как есть.
+/// Speedwalk как в JMC: строка только из букв `n s e w u d` с необязательными числами
+/// (`3n2ew`) → команды движения. Отправляем русские команды: их понимает и сервер, и маппер.
+/// Не подходит под шаблон (или слишком много шагов) — `None`, строка уходит как есть.
+fn expand_speedwalk(text: &str) -> Option<Vec<String>> {
+    const MAX_STEPS: usize = 100;
+    let mut steps = Vec::new();
+    let mut count = String::new();
+    for c in text.trim().chars() {
+        if c.is_ascii_digit() {
+            count.push(c);
+            continue;
+        }
+        let step = match c {
+            'n' => "север",
+            's' => "юг",
+            'e' => "восток",
+            'w' => "запад",
+            'u' => "вверх",
+            'd' => "вниз",
+            _ => return None,
+        };
+        let times: usize = if count.is_empty() { 1 } else { count.parse().ok()? };
+        count.clear();
+        if steps.len() + times > MAX_STEPS {
+            return None;
+        }
+        steps.extend(std::iter::repeat_n(step.to_string(), times));
+    }
+    // Число в конце без буквы («3») — это не speedwalk.
+    (count.is_empty() && !steps.is_empty()).then_some(steps)
+}
+
 fn canonical_command(name: &str) -> String {
     if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) || is_known_command(name) {
         return name.to_string();
@@ -2154,5 +2218,32 @@ mod tests {
         assert_eq!(canonical_command("ali"), "ali");
         assert_eq!(canonical_command("3000:15"), "3000:15");
         assert_eq!(canonical_command("нет"), "нет");
+    }
+
+    #[test]
+    fn speedwalk_разворачивает_шаги() {
+        let mut a = Automation::new();
+        let sent = |fx: Vec<Effect>| -> Vec<String> {
+            fx.into_iter()
+                .filter_map(|e| match e {
+                    Effect::Send(c) => Some(c),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Пока выключен — строка уходит как есть.
+        assert_eq!(sent(a.user_input("2ne")), vec!["2ne"]);
+        a.import("#speedwalk on");
+        assert!(a.speedwalk);
+        assert_eq!(sent(a.user_input("2ne")), vec!["север", "север", "восток"]);
+        assert_eq!(sent(a.user_input("ud")), vec!["вверх", "вниз"]);
+        // Не speedwalk: другие буквы, число без направления.
+        assert_eq!(sent(a.user_input("смотр")), vec!["смотр"]);
+        assert_eq!(sent(a.user_input("nap")), vec!["nap"]);
+        assert_eq!(sent(a.user_input("3")), vec!["3"]);
+        assert!(a.to_script().contains("#speedwalk on"));
+        a.user_input("#speedwalk");
+        assert!(!a.speedwalk);
+        assert!(!a.to_script().contains("#speedwalk"));
     }
 }

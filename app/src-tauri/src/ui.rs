@@ -88,6 +88,7 @@ pub enum UiEvent {
         zone: u32,
         area: String,
         z: i32,
+        own_z: i32,
         rooms: Vec<UiMapRoom>,
         path: Vec<u32>,
     },
@@ -127,6 +128,7 @@ fn map_event(view: MapView) -> UiEvent {
         zone: view.zone,
         area: view.area,
         z: view.z,
+        own_z: view.own_z,
         rooms: view
             .rooms
             .into_iter()
@@ -207,6 +209,7 @@ impl UiEvent {
             // Сохранение настроек и отправка серверу обрабатываются до интерфейса.
             SessionOutput::AutomationChanged(_)
             | SessionOutput::Send(_)
+            | SessionOutput::Log(_)
             | SessionOutput::CloseRequested => None,
         }
     }
