@@ -82,11 +82,16 @@ pub enum UiEvent {
     Wclear {
         window: usize,
     },
+    /// Найденные комнаты (поиск в панели карты).
+    MapFound {
+        rooms: Vec<klubok_core::FoundRoom>,
+    },
     /// Состояние персонажа (жизнь, бодрость, группа…).
     Status(klubok_core::CharStatus),
     /// Карта текущей зоны и уровня.
     Map {
         current: u32,
+        center: u32,
         zone: u32,
         area: String,
         z: i32,
@@ -138,6 +143,7 @@ pub struct UiMapExit {
 fn map_event(view: MapView) -> UiEvent {
     UiEvent::Map {
         current: view.current,
+        center: view.center,
         zone: view.zone,
         area: view.area,
         z: view.z,
@@ -213,6 +219,7 @@ impl UiEvent {
             }),
             SessionOutput::Map(view) => Some(map_event(view)),
             SessionOutput::Status(status) => Some(UiEvent::Status(status)),
+            SessionOutput::MapFound(rooms) => Some(UiEvent::MapFound { rooms }),
             SessionOutput::Window(op) => Some(match op {
                 WindowOp::Output { window, line } => UiEvent::Woutput {
                     window,

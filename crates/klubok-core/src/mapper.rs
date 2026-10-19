@@ -19,6 +19,8 @@ const MAX_REROUTES: u32 = 3;
 #[derive(Debug, Clone, PartialEq)]
 pub struct MapView {
     pub current: u32,
+    /// Комната в центре панели: игрок или выбранная в поиске (`MapEdit::Focus`).
+    pub center: u32,
     pub zone: u32,
     pub area: String,
     /// Показанный уровень (игрок может смотреть выше/ниже себя).
@@ -54,6 +56,12 @@ pub enum MapEdit {
         flag: String,
         on: bool,
     },
+    /// Найти комнаты по части названия, номеру или заметке — ответ `MapperEvent::Found`.
+    Find { query: String },
+    /// Показать на панели карту вокруг комнаты `vnum` (любой зоны); `None` — вернуться к игроку.
+    Focus { vnum: Option<u32> },
+    /// Записать заметку к комнате (пусто — стереть).
+    Note { vnum: u32, note: String },
     /// Посмотреть на уровень выше/ниже (`dz` = ±1); `dz` = 0 — вернуться на свой уровень.
     /// Карта не меняется; при переходе в другую комнату вид возвращается к игроку.
     Level { dz: i32 },
@@ -67,7 +75,21 @@ pub enum MapperEvent {
     Echo(String),
     Warning(String),
     View(MapView),
+    /// Результат поиска из панели карты.
+    Found(Vec<FoundRoom>),
 }
+
+/// Найденная комната (для списка в панели карты).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct FoundRoom {
+    pub vnum: u32,
+    pub name: String,
+    pub area: String,
+    pub note: String,
+}
+
+/// Сколько найденных комнат показывать.
+const FOUND_LIMIT: usize = 50;
 
 /// Идём по пути `#go`.
 struct Walk {
@@ -91,6 +113,8 @@ pub struct Mapper {
     store_failed: bool,
     /// На сколько уровней выше (+) или ниже (−) игрока смотрит панель карты.
     look_dz: i32,
+    /// Комната, вокруг которой смотрим карту (вместо игрока).
+    focus: Option<u32>,
 }
 
 impl Default for Mapper {
@@ -111,6 +135,7 @@ impl Mapper {
             moved_since_prompt: false,
             store_failed: false,
             look_dz: 0,
+            focus: None,
         }
     }
 
@@ -191,6 +216,7 @@ impl Mapper {
         if moved {
             self.moved_since_prompt = true;
             self.look_dz = 0;
+            self.focus = None;
             let step = self.pending_moves.pop_front();
             // Скрытый выход записываем, только если шаг однозначен: в очереди был один.
             // Иначе непонятно, какая команда привела сюда, — лучше не записать, чем записать мусор.
@@ -258,10 +284,40 @@ impl Mapper {
         }
     }
 
+    /// Поиск для панели карты: номер комнаты, часть названия или заметки.
+    fn find(&self, query: &str) -> Vec<FoundRoom> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let by_vnum = query.parse::<u32>().ok();
+        let mut rooms: Vec<&klubok_map::Room> = self
+            .map
+            .rooms()
+            .filter(|r| {
+                Some(r.vnum) == by_vnum
+                    || r.name.to_lowercase().contains(&query)
+                    || r.note.to_lowercase().contains(&query)
+            })
+            .collect();
+        rooms.sort_by_key(|r| r.vnum);
+        rooms
+            .into_iter()
+            .take(FOUND_LIMIT)
+            .map(|r| FoundRoom {
+                vnum: r.vnum,
+                name: r.name.clone(),
+                area: r.area.clone(),
+                note: r.note.clone(),
+            })
+            .collect()
+    }
+
     /// Текущая зона для рисования.
     pub fn view(&self) -> Option<MapView> {
         let current = self.tracker.current()?;
-        let here = self.map.room(current)?;
+        let center = self.focus.unwrap_or(current);
+        let here = self.map.room(center)?;
         let z = here.z + self.look_dz;
         let rooms = self
             .map
@@ -282,6 +338,7 @@ impl Mapper {
             .unwrap_or_default();
         Some(MapView {
             current,
+            center,
             zone: here.zone,
             area: here.area.clone(),
             z,
@@ -406,6 +463,19 @@ impl Mapper {
                     if self.map.set_flag(vnum, &flag, on).is_ok() {
                         self.save(vnum, &mut out);
                     }
+                }
+            }
+            MapEdit::Find { query } => {
+                out.push(MapperEvent::Found(self.find(&query)));
+                return out; // карта не изменилась
+            }
+            MapEdit::Focus { vnum } => {
+                self.focus = vnum.filter(|v| self.map.room(*v).is_some());
+                self.look_dz = 0;
+            }
+            MapEdit::Note { vnum, note } => {
+                if self.map.set_note(vnum, note.trim()).is_ok() {
+                    self.save(vnum, &mut out);
                 }
             }
             MapEdit::Level { dz } => {
@@ -863,6 +933,39 @@ mod tests {
         m.edit(MapEdit::Level { dz: -1 });
         let v = view(m.on_room(&room_msdp(101, &[("w", 100), ("n", 102)])));
         assert_eq!(v.z, 0);
+    }
+
+    #[test]
+    fn поиск_просмотр_и_заметка_из_панели() {
+        let mut m = Mapper::new(Map::new(), None);
+        walked(&mut m);
+        let found = |events: Vec<MapperEvent>| -> Vec<u32> {
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    MapperEvent::Found(rooms) => Some(rooms.iter().map(|r| r.vnum).collect()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(found(m.edit(MapEdit::Find { query: "101".into() })), vec![101]);
+        assert_eq!(found(m.edit(MapEdit::Find { query: "КОМНАТА".into() })).len(), 3);
+
+        m.edit(MapEdit::Note { vnum: 100, note: " тут лавка ".into() });
+        assert_eq!(found(m.edit(MapEdit::Find { query: "лавк".into() })), vec![100]);
+
+        let center = |events: Vec<MapperEvent>| {
+            events
+                .into_iter()
+                .find_map(|e| match e {
+                    MapperEvent::View(v) => Some((v.current, v.center)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(center(m.edit(MapEdit::Focus { vnum: Some(100) })), (102, 100));
+        // Шаг игрока — вид снова на нём.
+        assert_eq!(center(m.on_room(&room_msdp(101, &[("w", 100), ("n", 102)]))), (101, 101));
     }
 }
 

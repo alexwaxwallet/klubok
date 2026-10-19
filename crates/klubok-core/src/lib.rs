@@ -12,7 +12,7 @@ pub mod status;
 
 pub use klubok_automation::{Automation, Hotkey, ImportReport};
 pub use login::Credentials;
-pub use mapper::{MapEdit, MapView, Mapper};
+pub use mapper::{FoundRoom, MapEdit, MapView, Mapper};
 pub use net::{replay, run_session};
 pub use profile::{Profile, ProfileStore, decode_settings_file};
 pub use status::{CharStatus, GroupMember};

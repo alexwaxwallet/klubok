@@ -36,6 +36,7 @@ export type SessionEvent =
   | { type: "hotkeys"; hotkeys: Hotkey[] }
   | ({ type: "map" } & MapView)
   | ({ type: "status" } & CharStatus)
+  | { type: "mapfound"; rooms: FoundRoom[] }
   | { type: "woutput"; window: number; spans: Span[] }
   | { type: "wname"; window: number; name: string }
   | { type: "wshow"; window: number; mode: "toggle" | "show" | "hide" }
@@ -102,6 +103,8 @@ export interface MapGhost {
 /** Карта текущей зоны и уровня. */
 export interface MapView {
   current: number;
+  /** Комната в центре: игрок или выбранная в поиске. */
+  center: number;
   zone: number;
   area: string;
   /** Показанный уровень. */
@@ -121,7 +124,18 @@ export type MapEdit =
   | { type: "delete"; rooms: number[] }
   | { type: "color"; rooms: number[]; color: string }
   | { type: "flag"; rooms: number[]; flag: string; on: boolean }
-  | { type: "level"; dz: number };
+  | { type: "level"; dz: number }
+  | { type: "find"; query: string }
+  | { type: "focus"; vnum: number | null }
+  | { type: "note"; vnum: number; note: string };
+
+/** Найденная комната (поиск в панели карты). */
+export interface FoundRoom {
+  vnum: number;
+  name: string;
+  area: string;
+  note: string;
+}
 
 export function mapEdit(edit: MapEdit): Promise<void> {
   return invoke("map_edit", { edit });

@@ -6,16 +6,22 @@
   // Обычный режим: клик по клетке — идти туда (#go), перетаскивание поля — сдвиг вида.
   // Режим правки (✎): клик — выделить (Shift — добавить), рамка по пустому месту — выделить
   // группу, перетаскивание выделенного — сдвинуть клетки; стрелки, Delete, цвет, пометки.
-  import type { MapEdit, MapGhost, MapRoom, MapView } from "./session";
+  import { tick } from "svelte";
+  import type { FoundRoom, MapEdit, MapGhost, MapRoom, MapView } from "./session";
 
   let {
     view,
     ongo,
     onedit,
+    found = null,
+    onclearfound,
   }: {
     view: MapView;
     ongo: (vnum: number) => void;
     onedit: (edit: MapEdit) => void;
+    /** Ответ на поиск (`null` — не искали). */
+    found?: FoundRoom[] | null;
+    onclearfound?: () => void;
   } = $props();
 
   /** Шаг сетки в пикселях при масштабе 1. */
@@ -54,14 +60,56 @@
   }
   let drag = $state<Drag | null>(null);
 
-  // Игрок перешёл в другую комнату — снова центрируем на нём.
-  let lastCurrent = 0;
+  // Сменилась комната в центре (игрок шагнул или выбрали найденную) — центрируем на ней.
+  let lastCenter = 0;
   $effect(() => {
-    if (view.current !== lastCurrent) {
-      lastCurrent = view.current;
+    if (view.center !== lastCenter) {
+      lastCenter = view.center;
       pan = { x: 0, y: 0 };
     }
   });
+
+  /** Смотрим не на игрока, а на комнату из поиска. */
+  let browsing = $derived(view.center !== view.current);
+
+  // ───────────── поиск ─────────────
+
+  let searching = $state(false);
+  let query = $state("");
+  let searchInput: HTMLInputElement | undefined = $state();
+
+  function toggleSearch() {
+    searching = !searching;
+    if (searching) tick().then(() => searchInput?.focus());
+    else onclearfound?.();
+  }
+
+  function searchKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && query.trim()) onedit({ type: "find", query: query.trim() });
+    if (e.key === "Escape") toggleSearch();
+  }
+
+  // ───────────── заметка ─────────────
+
+  /** Комната, заметку которой правим. */
+  let noteRoom: number | null = $state(null);
+  let noteText = $state("");
+  let noteInput: HTMLInputElement | undefined = $state();
+
+  function startNote() {
+    const vnum = [...selected][0];
+    noteRoom = vnum;
+    noteText = byVnum.get(vnum)?.note ?? "";
+    tick().then(() => noteInput?.focus());
+  }
+
+  function noteKey(e: KeyboardEvent) {
+    if (e.key === "Enter" && noteRoom !== null) {
+      onedit({ type: "note", vnum: noteRoom, note: noteText });
+      noteRoom = null;
+    }
+    if (e.key === "Escape") noteRoom = null;
+  }
 
   function loadZoom(): number {
     try {
@@ -75,7 +123,8 @@
   /** ◎: центр на игроке и его уровень. */
   function toMe() {
     pan = { x: 0, y: 0 };
-    if (view.z !== view.own_z) onedit({ type: "level", dz: 0 });
+    if (browsing) onedit({ type: "focus", vnum: null });
+    else if (view.z !== view.own_z) onedit({ type: "level", dz: 0 });
   }
 
   function setZoom(z: number) {
@@ -97,7 +146,8 @@
   let s = $derived(CELL * zoom);
   let half = $derived(s * 0.31);
   let byVnum = $derived(new Map(view.rooms.map((r) => [r.vnum, r])));
-  let here = $derived(byVnum.get(view.current));
+  /** Комната в центре панели (обычно — игрок). */
+  let here = $derived(byVnum.get(view.center));
   let onPath = $derived(new Set(view.path));
 
   /** Комнаты, стоящие в одной клетке с другими: номер по порядку в клетке. */
@@ -324,8 +374,8 @@
   }
 
   function key(e: KeyboardEvent) {
-    // Цифровой блок — горячие клавиши (ходьба), карта его не трогает.
-    if (!editing || e.location === 3) return;
+    // Цифровой блок — горячие клавиши (ходьба), карта его не трогает. В полях ввода — обычный ввод.
+    if (!editing || e.location === 3 || (e.target as HTMLElement).tagName === "INPUT") return;
     const arrows: Record<string, [number, number]> = {
       ArrowLeft: [-1, 0],
       ArrowRight: [1, 0],
@@ -362,9 +412,41 @@
     <button title="Посмотреть уровень выше" onclick={() => onedit({ type: "level", dz: 1 })}>▲</button>
     <button title="Мельче" onclick={() => setZoom(zoom / 1.25)}>−</button>
     <button title="Крупнее" onclick={() => setZoom(zoom * 1.25)}>+</button>
-    <button title="К себе" onclick={toMe}>◎</button>
+    <button class:on={searching} title="Найти комнату" onclick={toggleSearch}>⌕</button>
+    <button class:on={browsing} title={browsing ? "Вернуться к себе" : "К себе"} onclick={toMe}>◎</button>
     <button class:on={editing} title="Правка карты" onclick={toggleEditing}>✎</button>
   </div>
+  {#if browsing}
+    <div class="browse">просмотр [{view.center}] — клик по клетке: идти туда; ◎ — к себе</div>
+  {/if}
+  {#if searching}
+    <div class="search">
+      <input
+        bind:this={searchInput}
+        bind:value={query}
+        placeholder="название, номер или заметка — Enter"
+        spellcheck="false"
+        onkeydown={searchKey}
+      />
+      {#if found}
+        <div class="found">
+          {#each found as f (f.vnum)}
+            <div class="found-row" class:active={f.vnum === view.center}>
+              <button
+                class="found-name"
+                title="Показать на карте{f.note ? `\n${f.note}` : ''}"
+                onclick={() => onedit({ type: "focus", vnum: f.vnum })}
+                >[{f.vnum}] {f.name} <span class="found-area">{f.area}</span></button
+              >
+              <button title="Идти туда (#go {f.vnum})" onclick={() => ongo(f.vnum)}>→</button>
+            </div>
+          {:else}
+            <div class="found-none">ничего не найдено</div>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
   {#if editing}
     <div class="tools">
       <span class="sel">{selected.size ? `выделено ${selected.size}` : "выделите клетки"}</span>
@@ -387,6 +469,16 @@
       {#each FLAGS as f (f.flag)}
         <button title={f.title} onclick={() => toggleFlag(f.flag)}>{f.icon}</button>
       {/each}
+      <button title="Заметка к комнате" disabled={selected.size !== 1} onclick={startNote}>✍</button>
+      {#if noteRoom !== null}
+        <input
+          class="note-input"
+          bind:this={noteInput}
+          bind:value={noteText}
+          placeholder="заметка к [{noteRoom}] — Enter, пусто — стереть"
+          onkeydown={noteKey}
+        />
+      {/if}
     </div>
   {/if}
   <div class="canvas" bind:clientWidth={width} bind:clientHeight={height}>
@@ -468,6 +560,9 @@
             <text class="icon" y={half * 0.38} font-size={half * 1.25}>{icon(r)}</text>
           {/if}
           {#if r.note}<circle class="note" cx={half - 3} cy={half - 3} r="2" />{/if}
+          {#if browsing && r.vnum === view.center}
+            <rect class="focus" x={-half - 4} y={-half - 4} width={half * 2 + 8} height={half * 2 + 8} rx="2" />
+          {/if}
           {#if r.vnum === view.current}
             <rect class="here" x={-half - 3} y={-half - 3} width={half * 2 + 6} height={half * 2 + 6} rx="2" />
           {/if}
@@ -520,6 +615,76 @@
 
   .level {
     white-space: nowrap;
+  }
+
+  .browse {
+    padding: 2px 4px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--accent);
+    border: 1px dashed var(--accent);
+    border-radius: 3px;
+  }
+
+  .search {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 4px;
+    font-size: 12px;
+  }
+
+  .search input,
+  .note-input {
+    width: 100%;
+    padding: 3px 6px;
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    background: var(--input-bg);
+    outline: none;
+  }
+
+  .search input:focus,
+  .note-input:focus {
+    border-color: var(--accent);
+  }
+
+  .found {
+    max-height: 160px;
+    overflow-y: auto;
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+  }
+
+  .found-row {
+    display: flex;
+    align-items: center;
+  }
+
+  .found-row.active {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+
+  .found-row .found-name {
+    flex: 1;
+    min-width: 0;
+    height: auto;
+    padding: 2px 4px;
+    border: none;
+    background: none;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .found-area {
+    color: var(--muted);
+  }
+
+  .found-none {
+    padding: 2px 4px;
+    color: var(--muted);
   }
   .level.away {
     color: var(--accent);
@@ -655,6 +820,13 @@
 
   .note {
     fill: #1a5fd0;
+  }
+
+  .focus {
+    fill: none;
+    stroke: #00e0ff;
+    stroke-width: 2;
+    stroke-dasharray: 4 3;
   }
 
   .here {

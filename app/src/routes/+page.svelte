@@ -15,6 +15,7 @@
     plainText,
     send,
     type CharStatus,
+    type FoundRoom,
     type Exit,
     type Hotkey,
     type MapView,
@@ -74,6 +75,8 @@
   let room: Room | null = $state(null);
   let mapView: MapView | null = $state.raw(null);
   let status: CharStatus | null = $state.raw(null);
+  /** Результат поиска комнат в панели карты (`null` — не искали). */
+  let mapFound: FoundRoom[] | null = $state.raw(null);
   let profiles: ProfileInfo[] = $state([]);
   let passwordStorage = $state("");
   let selectedId = $state("");
@@ -186,6 +189,9 @@
           break;
         case "status":
           status = event;
+          break;
+        case "mapfound":
+          mapFound = event.rooms;
           break;
         case "woutput": {
           const w = windows[event.window];
@@ -493,6 +499,8 @@
         {#if mapView}
           <MapPanel
             view={mapView}
+            found={mapFound}
+            onclearfound={() => (mapFound = null)}
             ongo={(vnum) => submit(`#go ${vnum}`)}
             onedit={(edit) => mapEdit(edit).catch((e) => note("error", String(e)))}
           />

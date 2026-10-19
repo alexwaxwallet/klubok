@@ -15,7 +15,7 @@ use klubok_proto::{
 };
 
 use crate::login::{AutoLogin, Credentials, LoginStep};
-use crate::mapper::{MapEdit, MapView, Mapper, MapperEvent};
+use crate::mapper::{FoundRoom, MapEdit, MapView, Mapper, MapperEvent};
 use crate::status::{self, CharStatus};
 
 /// Настройки подключения.
@@ -97,6 +97,8 @@ pub enum SessionOutput {
     Map(MapView),
     /// Окно вывода (`#woutput` и др.).
     Window(WindowOp),
+    /// Результат поиска комнат из панели карты.
+    MapFound(Vec<FoundRoom>),
     /// Состояние персонажа по MSDP изменилось.
     Status(CharStatus),
     /// Начать или остановить лог сессии (`#log`) — файлом занимается сетевой цикл.
@@ -313,6 +315,7 @@ impl Session {
                 MapperEvent::Echo(text) => out.push(SessionOutput::Echo(text)),
                 MapperEvent::Warning(text) => out.push(SessionOutput::Warning(text)),
                 MapperEvent::View(view) => out.push(SessionOutput::Map(view)),
+                MapperEvent::Found(rooms) => out.push(SessionOutput::MapFound(rooms)),
             }
         }
     }
