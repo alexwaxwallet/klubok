@@ -8,10 +8,12 @@ pub mod mapper;
 pub mod net;
 pub mod profile;
 pub mod session;
+pub mod status;
 
 pub use klubok_automation::{Automation, Hotkey, ImportReport};
 pub use login::Credentials;
 pub use mapper::{MapEdit, MapView, Mapper};
 pub use net::{replay, run_session};
 pub use profile::{Profile, ProfileStore, decode_settings_file};
+pub use status::{CharStatus, GroupMember};
 pub use session::{LogOp, Session, SessionConfig, SessionInput, SessionOutput};

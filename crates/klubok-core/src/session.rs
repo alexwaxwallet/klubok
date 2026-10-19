@@ -16,6 +16,7 @@ use klubok_proto::{
 
 use crate::login::{AutoLogin, Credentials, LoginStep};
 use crate::mapper::{MapEdit, MapView, Mapper, MapperEvent};
+use crate::status::{self, CharStatus};
 
 /// Настройки подключения.
 #[derive(Debug, Clone)]
@@ -96,6 +97,8 @@ pub enum SessionOutput {
     Map(MapView),
     /// Окно вывода (`#woutput` и др.).
     Window(WindowOp),
+    /// Состояние персонажа по MSDP изменилось.
+    Status(CharStatus),
     /// Начать или остановить лог сессии (`#log`) — файлом занимается сетевой цикл.
     Log(LogOp),
     /// Нужно разорвать соединение (`#zap`).
@@ -128,6 +131,10 @@ pub struct Session {
     msdp_active: bool,
     /// Комнату уже запросили после входа в игру (см. `request_room`).
     room_requested: bool,
+    /// Состояние персонажа (жизнь, бодрость, группа…) из MSDP.
+    status: CharStatus,
+    /// Прошлый игровой промпт: `STATE` запрашиваем, только когда промпт изменился.
+    last_prompt: String,
 }
 
 impl Session {
@@ -143,6 +150,8 @@ impl Session {
             now: Duration::ZERO,
             msdp_active: false,
             room_requested: false,
+            status: CharStatus::default(),
+            last_prompt: String::new(),
             automation,
             config,
         }
@@ -331,6 +340,8 @@ impl Session {
                         let events = self.mapper.on_room(&value);
                         out.push(SessionOutput::Msdp(name, value));
                         self.apply_mapper(events, out);
+                    } else if self.status.update(&name, &value) {
+                        out.push(SessionOutput::Status(self.status.clone()));
                     } else {
                         out.push(SessionOutput::Msdp(name, value));
                     }
@@ -435,12 +446,26 @@ impl Session {
     ///
     /// Только на игровом промпте (кончается на `>`): до входа персонажа у сервера нет
     /// персонажа, и запрос комнаты там опасен для сервера.
+    ///
+    /// Заодно — состояние персонажа: подписка на то, что сервер присылает сам, и первые значения.
+    /// Текущие жизнь и бодрость (`STATE`) сервер сам не присылает — просим при каждом новом промпте
+    /// (промпт обычно показывает жизнь, так что изменился промпт — изменилось и состояние).
     fn request_room(&mut self, prompt: &str, out: &mut Vec<SessionOutput>) {
-        if self.room_requested || !self.msdp_active || !prompt.trim_end().ends_with('>') {
+        if !self.msdp_active || !prompt.trim_end().ends_with('>') {
             return;
         }
-        self.room_requested = true;
-        out.push(SessionOutput::Send(msdp::send("ROOM")));
+        if !self.room_requested {
+            self.room_requested = true;
+            out.push(SessionOutput::Send(msdp::send("ROOM")));
+            for name in status::REPORTED {
+                out.push(SessionOutput::Send(msdp::report(name)));
+                out.push(SessionOutput::Send(msdp::send(name)));
+            }
+        }
+        if prompt != self.last_prompt {
+            self.last_prompt = prompt.to_string();
+            out.push(SessionOutput::Send(msdp::send("STATE")));
+        }
     }
 
     fn run_login(&mut self, text: &str, out: &mut Vec<SessionOutput>) {
@@ -690,10 +715,17 @@ mod tests {
         let out = feed(&mut s, b"\xff\xf9");
         assert!(!sent(&out).contains(&msdp::send("ROOM")));
         let out = feed(&mut s, b"500H 82M> \xff\xf9");
-        assert_eq!(sent(&out), vec![msdp::send("ROOM")]);
-        // Второй раз — нет.
+        let out = sent(&out);
+        assert_eq!(out[0], msdp::send("ROOM"));
+        // Заодно — подписка на состояние персонажа и текущие жизнь/бодрость.
+        assert!(out.contains(&msdp::report("MAX_HIT")));
+        assert_eq!(out.last(), Some(&msdp::send("STATE")));
+        // Тот же промпт — ничего не просим.
         let out = feed(&mut s, b"500H 82M> \xff\xf9");
         assert!(sent(&out).is_empty());
+        // Промпт изменился — только STATE.
+        let out = feed(&mut s, b"450H 82M> \xff\xf9");
+        assert_eq!(sent(&out), vec![msdp::send("STATE")]);
     }
 
     #[test]

@@ -35,6 +35,7 @@ export type SessionEvent =
   | { type: "bell" }
   | { type: "hotkeys"; hotkeys: Hotkey[] }
   | ({ type: "map" } & MapView)
+  | ({ type: "status" } & CharStatus)
   | { type: "woutput"; window: number; spans: Span[] }
   | { type: "wname"; window: number; name: string }
   | { type: "wshow"; window: number; mode: "toggle" | "show" | "hide" }
@@ -60,6 +61,34 @@ export interface MapRoom {
   /** `dt`, `aggro`, `flydt`, `nostep`. */
   flags?: string[];
   exits: MapExit[];
+}
+
+/** Состояние персонажа по MSDP; `null` — сервер ещё не сообщил. */
+export interface CharStatus {
+  hp: number | null;
+  max_hp: number | null;
+  moves: number | null;
+  max_moves: number | null;
+  /** Только у «маначных» классов. */
+  mana: number | null;
+  level: number | null;
+  exp: number | null;
+  gold: number | null;
+  bank: number | null;
+  group: GroupMember[];
+}
+
+export interface GroupMember {
+  name: string;
+  /** Проценты. */
+  health: number;
+  moves: number;
+  here: boolean;
+  /** Секунд до конца запоминания (0 — всё выучено). */
+  mem_time: number;
+  affects: string;
+  role: string;
+  position: string;
 }
 
 /** Комната соседнего уровня. */

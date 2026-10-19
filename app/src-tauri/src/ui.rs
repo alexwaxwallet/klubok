@@ -82,6 +82,8 @@ pub enum UiEvent {
     Wclear {
         window: usize,
     },
+    /// Состояние персонажа (жизнь, бодрость, группа…).
+    Status(klubok_core::CharStatus),
     /// Карта текущей зоны и уровня.
     Map {
         current: u32,
@@ -210,6 +212,7 @@ impl UiEvent {
                     .collect(),
             }),
             SessionOutput::Map(view) => Some(map_event(view)),
+            SessionOutput::Status(status) => Some(UiEvent::Status(status)),
             SessionOutput::Window(op) => Some(match op {
                 WindowOp::Output { window, line } => UiEvent::Woutput {
                     window,
@@ -231,6 +234,7 @@ impl UiEvent {
             SessionOutput::AutomationChanged(_)
             | SessionOutput::Send(_)
             | SessionOutput::Log(_)
+
             | SessionOutput::CloseRequested => None,
         }
     }

@@ -4,6 +4,7 @@
   import CommandInput from "$lib/CommandInput.svelte";
   import ProfileDialog from "$lib/ProfileDialog.svelte";
   import MapPanel from "$lib/MapPanel.svelte";
+  import StatusPanel from "$lib/StatusPanel.svelte";
   import AutomationEditor from "$lib/AutomationEditor.svelte";
   import { describeEvent, eventKeyName, normalizeSpec } from "$lib/hotkeys";
   import {
@@ -13,6 +14,7 @@
     onSession,
     plainText,
     send,
+    type CharStatus,
     type Exit,
     type Hotkey,
     type MapView,
@@ -71,6 +73,7 @@
   let connected = $state(false);
   let room: Room | null = $state(null);
   let mapView: MapView | null = $state.raw(null);
+  let status: CharStatus | null = $state.raw(null);
   let profiles: ProfileInfo[] = $state([]);
   let passwordStorage = $state("");
   let selectedId = $state("");
@@ -165,6 +168,9 @@
         case "map":
           mapView = event;
           break;
+        case "status":
+          status = event;
+          break;
         case "woutput": {
           const w = windows[event.window];
           const all = w.lines.concat([{ id: nextId++, kind: "line", spans: event.spans }]);
@@ -237,6 +243,7 @@
     note("info", `Подключаюсь к ${profile.host}:${profile.port} (${profile.name})…`);
     room = null;
     mapView = null;
+    status = null;
     try {
       await connect(selectedId);
       connected = true;
@@ -421,8 +428,9 @@
       />
     </section>
 
-    {#if room || mapView || shownWindows.length > 0}
+    {#if room || mapView || status || shownWindows.length > 0}
       <aside class="side">
+        {#if status}<StatusPanel {status} />{/if}
         {#if room}
           <div class="room-name">{room.name}</div>
           <div class="room-meta">[{room.vnum}] {room.area}</div>

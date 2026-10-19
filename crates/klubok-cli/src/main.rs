@@ -182,6 +182,10 @@ impl Screen {
                 self.line_start(&mut out);
                 let _ = writeln!(out, "\x1b[2m[MSDP] {name} = {value}\x1b[0m");
             }
+            SessionOutput::Status(status) if self.debug => {
+                self.line_start(&mut out);
+                let _ = writeln!(out, "\x1b[2m[статус] {status:?}\x1b[0m");
+            }
             SessionOutput::Info(text) if self.debug => {
                 self.line_start(&mut out);
                 let _ = writeln!(out, "\x1b[2m[клубок] {text}\x1b[0m");

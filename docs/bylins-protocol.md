@@ -76,3 +76,15 @@ ROOM = { VNUM "4014", NAME "Базарная площадь", AREA "Лесная
 `SEND "ROOM"` отвечает текущей комнатой сразу (`msdp.cpp: handle_send_command` → `report`). Слать только
 когда персонаж в игре: `RoomReporter::get` берёт `descriptor()->character->in_room` без проверки на null.
 После входа/переподключения ROOM сам не приходит до первого шага или «смотреть».
+
+## Состояние персонажа по MSDP
+
+`REPORTABLE_VARIABLES`: ROOM, EXPERIENCE, GOLD, LEVEL, MAX_HIT, MAX_MOVE, STATE, GROUP (`msdp.cpp`).
+- Сами (после `REPORT`) приходят при изменении: EXPERIENCE, GOLD `{POCKET, BANK}`, MAX_HIT, MAX_MOVE
+  (проверяются перед каждым промптом), GROUP (в бою и при смене группы). LEVEL — только по `SEND`.
+- `STATE {CURRENT_HP, CURRENT_MOVE, CURRENT_MANA?}` сервер **никогда не шлёт сам** — только на `SEND`.
+  `CURRENT_MANA` есть лишь у «маначных» классов; максимума маны в MSDP нет (`MAX_MANA` не зарегистрирован).
+- GROUP — массив таблиц `{NAME, HEALTH (%, шаг 10), MOVE (%), IS_HERE, MEM_TIME (сек), AFFECTS (буквы
+  О П Д Н С Л В Т), ROLE (leader/pc/npc), POSITION}`; вне группы — пустой массив.
+- Клиент: на первом игровом промпте `REPORT`+`SEND` всех, затем `SEND STATE` при каждом изменённом промпте.
+
