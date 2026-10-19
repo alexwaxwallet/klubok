@@ -6,7 +6,7 @@
   // Обычный режим: клик по клетке — идти туда (#go), перетаскивание поля — сдвиг вида.
   // Режим правки (✎): клик — выделить (Shift — добавить), рамка по пустому месту — выделить
   // группу, перетаскивание выделенного — сдвинуть клетки; стрелки, Delete, цвет, пометки.
-  import type { MapEdit, MapRoom, MapView } from "./session";
+  import type { MapEdit, MapGhost, MapRoom, MapView } from "./session";
 
   let {
     view,
@@ -197,6 +197,42 @@
     return r.exits.some((e) => e.dir === dir);
   }
 
+  /** Стороны клетки: где выход — проём, где нет — стена. `lit` — светлая грань объёма. */
+  const SIDES = [
+    { dir: "n", lit: true },
+    { dir: "w", lit: true },
+    { dir: "s", lit: false },
+    { dir: "e", lit: false },
+  ];
+
+  /** Полуширина проёма — как у перемычки между клетками. */
+  let gap = $derived(Math.max(1.5, s * 0.09));
+
+  /** Путь стороны клетки: целиком (`open` = false) или два куска по краям проёма. */
+  function side(dir: string, open: boolean): string {
+    const h = half;
+    // Концы стороны и её середина.
+    const [ax, ay, bx, by] = {
+      n: [-h, -h, h, -h],
+      s: [-h, h, h, h],
+      w: [-h, -h, -h, h],
+      e: [h, -h, h, h],
+    }[dir as "n" | "s" | "w" | "e"];
+    if (!open) return `M${ax},${ay} L${bx},${by}`;
+    const horizontal = ay === by;
+    const [m1x, m1y] = horizontal ? [-gap, ay] : [ax, -gap];
+    const [m2x, m2y] = horizontal ? [gap, ay] : [ax, gap];
+    return `M${ax},${ay} L${m1x},${m1y} M${m2x},${m2y} L${bx},${by}`;
+  }
+
+  /** Сдвиг клетки соседнего уровня: выше — вправо-вверх, ниже — влево-вниз. */
+  function ghostPos(g: MapGhost): [number, number] {
+    const k = (g.z > view.z ? 1 : -1) * s * 0.22;
+    const x = (g.x - (here?.x ?? 0)) * s + offset.x + k;
+    const y = -(g.y - (here?.y ?? 0)) * s + offset.y - k;
+    return [x, y];
+  }
+
   function icon(r: MapRoom): string {
     return FLAGS.find((f) => r.flags?.includes(f.flag))?.icon ?? "";
   }
@@ -374,10 +410,21 @@
       }}
     >
       <defs>
+        <!-- штриховка для комнат соседних уровней, как в MudMapper -->
+        <pattern id="ghost-hatch" width="4" height="4" patternUnits="userSpaceOnUse">
+          <rect width="4" height="4" class="ghost-bg" />
+          <path d="M0,4 L4,0 M-1,1 L1,-1 M3,5 L5,3" class="ghost-line" />
+        </pattern>
         <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4" markerHeight="4" orient="auto">
           <path d="M0,0 L10,5 L0,10 z" class="arrowhead" />
         </marker>
       </defs>
+      {#each view.ghosts ?? [] as g (g.vnum)}
+        {@const [x, y] = ghostPos(g)}
+        <rect class="ghost" x={x - half} y={y - half} width={half * 2} height={half * 2}>
+          <title>{g.z > view.z ? "уровнем выше" : "уровнем ниже"} [{g.vnum}]</title>
+        </rect>
+      {/each}
       {#each lines as l (l.key)}
         <line
           x1={l.x1}
@@ -407,9 +454,14 @@
         >
           <title>{title(r)}</title>
           <rect class="face" x={-half} y={-half} width={half * 2} height={half * 2} style:fill={r.color || null} />
-          <!-- объём: светлый верх-лево, тёмный низ-право -->
-          <path class="light" d="M{-half},{half} V{-half} H{half}" />
-          <path class="dark" d="M{-half},{half} H{half} V{-half}" />
+          <!-- стороны: проём там, где выход; стена — где выхода нет -->
+          {#each SIDES as sd (sd.dir)}
+            {#if hasExit(r, sd.dir)}
+              <path class={sd.lit ? "light" : "dark"} d={side(sd.dir, true)} />
+            {:else}
+              <path class="wall" d={side(sd.dir, false)} style:stroke-width="{Math.max(2, s * 0.08)}px" />
+            {/if}
+          {/each}
           {#if hasExit(r, "u")}<path class="updown" d="M{half - 1},{-half + 1} h{-half * 0.7} l{half * 0.7},{half * 0.7} z" />{/if}
           {#if hasExit(r, "d")}<path class="updown" d="M{-half + 1},{half - 1} h{half * 0.7} l{-half * 0.7},{-half * 0.7} z" />{/if}
           {#if icon(r)}
@@ -568,6 +620,27 @@
 
   .dark {
     stroke: var(--map-room-dark);
+  }
+
+  .wall {
+    fill: none;
+    stroke: var(--map-wall);
+    stroke-linecap: square;
+  }
+
+  .ghost {
+    fill: url(#ghost-hatch);
+    opacity: 0.8;
+    pointer-events: none;
+  }
+
+  .ghost-bg {
+    fill: var(--map-ghost-bg);
+  }
+
+  .ghost-line {
+    stroke: var(--map-ghost-line);
+    stroke-width: 1;
   }
 
   .updown {

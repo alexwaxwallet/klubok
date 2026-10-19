@@ -62,6 +62,14 @@ export interface MapRoom {
   exits: MapExit[];
 }
 
+/** Комната соседнего уровня. */
+export interface MapGhost {
+  vnum: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
 /** Карта текущей зоны и уровня. */
 export interface MapView {
   current: number;
@@ -72,6 +80,8 @@ export interface MapView {
   /** Уровень игрока. */
   own_z: number;
   rooms: MapRoom[];
+  /** Комнаты уровнем выше и ниже (рисуются полупрозрачно). */
+  ghosts: MapGhost[];
   /** Оставшийся путь `#go`. */
   path: number[];
 }
@@ -147,7 +157,11 @@ export function newProfile(): Profile {
     port: 4000,
     charset: "utf8",
     character: "",
-    blank_lines: { max_consecutive: 1, trim_after_prompt: true, trim_before_prompt: true },
+    blank_lines: {
+      max_consecutive: 1,
+      trim_after_prompt: true,
+      trim_before_prompt: true,
+    },
     map: "bylins",
   };
 }
@@ -157,7 +171,11 @@ export function listProfiles(): Promise<ProfileList> {
 }
 
 /** password: undefined — не менять, "" — забыть. Возвращает id профиля. */
-export function saveProfile(id: string | null, profile: Profile, password?: string): Promise<string> {
+export function saveProfile(
+  id: string | null,
+  profile: Profile,
+  password?: string,
+): Promise<string> {
   return invoke("save_profile", { id, profile, password: password ?? null });
 }
 
@@ -165,7 +183,10 @@ export function deleteProfile(id: string): Promise<void> {
   return invoke("delete_profile", { id });
 }
 
-export function importSet(id: string, bytes: Uint8Array): Promise<ImportResult> {
+export function importSet(
+  id: string,
+  bytes: Uint8Array,
+): Promise<ImportResult> {
   return invoke("import_set", { id, bytes: Array.from(bytes) });
 }
 
@@ -198,7 +219,9 @@ export function disconnect(): Promise<void> {
 }
 
 /** Подписка на пачки событий сессии. */
-export function onSession(handler: (batch: SessionEvent[]) => void): Promise<UnlistenFn> {
+export function onSession(
+  handler: (batch: SessionEvent[]) => void,
+): Promise<UnlistenFn> {
   return listen<SessionEvent[]>("session", (event) => handler(event.payload));
 }
 

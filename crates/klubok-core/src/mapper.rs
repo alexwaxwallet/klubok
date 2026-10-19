@@ -26,6 +26,8 @@ pub struct MapView {
     /// Уровень, на котором стоит игрок.
     pub own_z: i32,
     pub rooms: Vec<Room>,
+    /// Комнаты той же зоны уровнем выше и ниже — рисуются полупрозрачно, как в MudMapper.
+    pub ghosts: Vec<Room>,
     /// Комнаты оставшегося пути `#go` — для подсветки.
     pub path: Vec<u32>,
 }
@@ -267,6 +269,12 @@ impl Mapper {
             .filter(|r| r.zone == here.zone && r.z == z)
             .cloned()
             .collect();
+        let ghosts = self
+            .map
+            .rooms()
+            .filter(|r| r.zone == here.zone && (r.z - z).abs() == 1)
+            .cloned()
+            .collect();
         let path = self
             .walk
             .as_ref()
@@ -279,6 +287,7 @@ impl Mapper {
             z,
             own_z: here.z,
             rooms,
+            ghosts,
             path,
         })
     }
@@ -846,6 +855,7 @@ mod tests {
         let v = view(m.edit(MapEdit::Level { dz: 1 }));
         assert_eq!((v.z, v.own_z), (1, 0));
         assert!(v.rooms.is_empty());
+        assert_eq!(v.ghosts.len(), 3); // свой уровень виден снизу
         let v = view(m.edit(MapEdit::Level { dz: 0 }));
         assert_eq!(v.z, 0);
         assert_eq!(v.rooms.len(), 3);

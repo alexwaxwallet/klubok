@@ -90,12 +90,23 @@ pub enum UiEvent {
         z: i32,
         own_z: i32,
         rooms: Vec<UiMapRoom>,
+        /// Комнаты уровнем выше/ниже — только клетки, полупрозрачно.
+        ghosts: Vec<UiMapGhost>,
         path: Vec<u32>,
     },
     Disconnected,
 }
 
 /// Комната для рисования карты. `y` растёт на север.
+/// Комната соседнего уровня: только где рисовать.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiMapGhost {
+    pub vnum: u32,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UiMapRoom {
     pub vnum: u32,
@@ -129,30 +140,40 @@ fn map_event(view: MapView) -> UiEvent {
         area: view.area,
         z: view.z,
         own_z: view.own_z,
-        rooms: view
-            .rooms
+        rooms: view.rooms.into_iter().map(ui_room).collect(),
+        ghosts: view
+            .ghosts
             .into_iter()
-            .map(|r| UiMapRoom {
+            .map(|r| UiMapGhost {
                 vnum: r.vnum,
-                exits: r
-                    .exits
-                    .iter()
-                    .map(|(dir, exit)| UiMapExit {
-                        dir: dir.msdp_key(),
-                        to: exit.to,
-                        hidden: exit.hidden,
-                        door: exit.door.is_some(),
-                    })
-                    .collect(),
-                name: r.name,
                 x: r.x,
                 y: r.y,
-                note: r.note,
-                color: r.color,
-                flags: r.flags,
+                z: r.z,
             })
             .collect(),
         path: view.path,
+    }
+}
+
+fn ui_room(r: klubok_map::Room) -> UiMapRoom {
+    UiMapRoom {
+        vnum: r.vnum,
+        exits: r
+            .exits
+            .iter()
+            .map(|(dir, exit)| UiMapExit {
+                dir: dir.msdp_key(),
+                to: exit.to,
+                hidden: exit.hidden,
+                door: exit.door.is_some(),
+            })
+            .collect(),
+        name: r.name,
+        x: r.x,
+        y: r.y,
+        note: r.note,
+        color: r.color,
+        flags: r.flags,
     }
 }
 
