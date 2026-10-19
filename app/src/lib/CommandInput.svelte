@@ -4,6 +4,7 @@
     password = false,
     sensitive = false,
     disabled = false,
+    complete,
   }: {
     onsubmit: (text: string) => void;
     /** Сервер спрашивает пароль: скрыть ввод и не запоминать его в истории. */
@@ -11,6 +12,8 @@
     /** Ввод может содержать пароль (например, «Имя Пароль» на входе): не запоминать в истории. */
     sensitive?: boolean;
     disabled?: boolean;
+    /** Слова для дополнения по Tab: подходящие под начало, сначала самые свежие. */
+    complete?: (prefix: string) => string[];
   } = $props();
 
   const HISTORY_LIMIT = 200;
@@ -42,7 +45,30 @@
     text = "";
   }
 
+  /** Дополнение по Tab: что было до слова, варианты и какой из них сейчас подставлен. */
+  let completion: { before: string; options: string[]; index: number } | null = null;
+
+  function tabComplete() {
+    if (completion) {
+      // Повторный Tab — следующий вариант по кругу.
+      completion.index = (completion.index + 1) % completion.options.length;
+    } else {
+      const match = /(\S+)$/.exec(text);
+      if (!match || !complete) return;
+      const options = complete(match[1]);
+      if (options.length === 0) return;
+      completion = { before: text.slice(0, match.index), options, index: 0 };
+    }
+    text = completion.before + completion.options[completion.index];
+  }
+
   function onKeydown(event: KeyboardEvent) {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      if (!password) tabComplete();
+      return;
+    }
+    completion = null;
     if (event.key === "Enter") {
       event.preventDefault();
       submit();

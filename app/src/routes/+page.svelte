@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import Output, { type OutputLine } from "$lib/Output.svelte";
+  import Output, { lineText, type OutputLine } from "$lib/Output.svelte";
   import CommandInput from "$lib/CommandInput.svelte";
   import ProfileDialog from "$lib/ProfileDialog.svelte";
   import MapPanel from "$lib/MapPanel.svelte";
@@ -96,6 +96,22 @@
   let swallowInputUntil = 0;
   let nextId = 0;
   let commandInput: CommandInput;
+  let output: Output;
+
+  /** Слова из последних строк вывода для дополнения по Tab (сначала свежие). */
+  function completeWord(prefix: string): string[] {
+    const p = prefix.toLowerCase();
+    const lower = prefix === p;
+    const seen = new Set<string>();
+    for (let i = lines.length - 1; i >= 0 && i >= lines.length - 500; i--) {
+      const words = lineText(lines[i]).split(/[^\p{L}\p{N}-]+/u).reverse();
+      for (const w of words) {
+        if (w.length <= prefix.length || !w.toLowerCase().startsWith(p)) continue;
+        seen.add(lower ? w.toLowerCase() : w);
+      }
+    }
+    return [...seen];
+  }
   let audio: AudioContext | null = null;
 
   let selected = $derived(profiles.find((p) => p.id === selectedId));
@@ -346,6 +362,22 @@
   /** Любая буква, набранная вне поля ввода, уходит в поле ввода. */
   function onWindowKeydown(event: KeyboardEvent) {
     if (editing !== undefined || editingAutomation) return;
+    // Прокрутка вывода и поиск — откуда угодно (свои горячие клавиши на них срабатывают раньше).
+    if (event.key === "PageUp" || event.key === "PageDown") {
+      event.preventDefault();
+      output.page(event.key === "PageUp" ? -1 : 1);
+      return;
+    }
+    if (event.ctrlKey && event.key === "End") {
+      event.preventDefault();
+      output.toBottom();
+      return;
+    }
+    if (event.ctrlKey && event.code === "KeyF") {
+      event.preventDefault();
+      output.openSearch();
+      return;
+    }
     const target = event.target as HTMLElement;
     if (target.closest("input, select, button, textarea")) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
@@ -419,12 +451,13 @@
 
   <main>
     <section class="terminal">
-      <Output {lines} />
+      <Output {lines} split bind:this={output} onclosesearch={() => commandInput.focus()} />
       <CommandInput
         bind:this={commandInput}
         onsubmit={submit}
         password={askingPassword}
         sensitive={askingName}
+        complete={completeWord}
       />
     </section>
 
