@@ -147,6 +147,11 @@ impl Mapper {
         self.tracker.current()
     }
 
+    /// Комната, где стоит игрок (если она есть на карте).
+    pub fn current_room(&self) -> Option<&klubok_map::Room> {
+        self.map.room(self.tracker.current()?)
+    }
+
     /// Строка от сервера. Сервер не сообщает в MSDP, что комната мирная, поэтому узнаём по
     /// тексту: «счет» («Тут вы чувствуете себя в безопасности.») или отказ начать драку.
     pub fn on_line(&mut self, text: &str) -> Vec<MapperEvent> {

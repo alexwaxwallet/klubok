@@ -27,6 +27,8 @@ pub struct Profile {
     pub blank_lines: BlankLineSettings,
     /// Имя карты: файл `<данные>/maps/<map>.sqlite`. Профили одного мира делят карту.
     pub map: String,
+    /// Переподключаться, если связь оборвалась не по воле игрока.
+    pub reconnect: bool,
 }
 
 impl Default for Profile {
@@ -39,6 +41,7 @@ impl Default for Profile {
             character: String::new(),
             blank_lines: BlankLineSettings::default(),
             map: "bylins".to_string(),
+            reconnect: true,
         }
     }
 }

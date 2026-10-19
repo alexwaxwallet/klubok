@@ -57,7 +57,8 @@ pub enum UiEvent {
     Warning {
         text: String,
     },
-    Error {
+    /// Связь оборвалась с ошибкой (или не удалось подключиться) — можно переподключаться.
+    ConnectionLost {
         text: String,
     },
     Bell,

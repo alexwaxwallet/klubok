@@ -217,6 +217,7 @@ impl Session {
                 let mut automation = Automation::new();
                 automation.import(&text);
                 self.automation = automation;
+                self.sync_system_vars();
                 self.apply_effects(vec![Effect::Changed], &mut out);
                 out.push(SessionOutput::Echo("Настройки обновлены.".to_string()));
             }
@@ -284,6 +285,34 @@ impl Session {
         }
     }
 
+    /// Переменные клиента для триггеров и скриптов: `$hp`, `$maxhp`, `$mv`, `$maxmv`, `$mana`,
+    /// `$level`, `$exp`, `$gold`, `$bank`, `$room` (номер), `$roomname`, `$area`.
+    fn sync_system_vars(&mut self) {
+        let s = &self.status;
+        let numbers = [
+            ("hp", s.hp),
+            ("maxhp", s.max_hp),
+            ("mv", s.moves),
+            ("maxmv", s.max_moves),
+            ("mana", s.mana),
+            ("level", s.level),
+            ("exp", s.exp),
+            ("gold", s.gold),
+            ("bank", s.bank),
+        ];
+        for (name, value) in numbers {
+            if let Some(value) = value {
+                self.automation.set_system_var(name, &value.to_string());
+            }
+        }
+        if let Some(room) = self.mapper.current_room() {
+            let (vnum, name, area) = (room.vnum.to_string(), room.name.clone(), room.area.clone());
+            self.automation.set_system_var("room", &vnum);
+            self.automation.set_system_var("roomname", &name);
+            self.automation.set_system_var("area", &area);
+        }
+    }
+
     /// `#log {файл} {append|overwrite}`; без файла — остановить. Относительное имя — в папке логов.
     fn log_command(&mut self, args: &[String], out: &mut Vec<SessionOutput>) {
         let file = args.first().map(|a| a.trim()).unwrap_or_default();
@@ -341,9 +370,11 @@ impl Session {
                 for (name, value) in msdp::decode(&data, self.config.charset) {
                     if name == "ROOM" {
                         let events = self.mapper.on_room(&value);
+                        self.sync_system_vars();
                         out.push(SessionOutput::Msdp(name, value));
                         self.apply_mapper(events, out);
                     } else if self.status.update(&name, &value) {
+                        self.sync_system_vars();
                         out.push(SessionOutput::Status(self.status.clone()));
                     } else {
                         out.push(SessionOutput::Msdp(name, value));

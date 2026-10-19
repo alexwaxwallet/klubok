@@ -32,6 +32,7 @@ export type SessionEvent =
   | { type: "echo"; text: string }
   | { type: "warning"; text: string }
   | { type: "error"; text: string }
+  | { type: "connectionlost"; text: string }
   | { type: "bell" }
   | { type: "hotkeys"; hotkeys: Hotkey[] }
   | ({ type: "map" } & MapView)
@@ -167,6 +168,8 @@ export interface Profile {
   blank_lines: BlankLines;
   /** Имя карты (файл в папке данных). Профили одного мира делят одну карту. */
   map: string;
+  /** Переподключаться при обрыве связи. */
+  reconnect: boolean;
 }
 
 export interface ProfileInfo {
@@ -206,6 +209,7 @@ export function newProfile(): Profile {
       trim_before_prompt: true,
     },
     map: "bylins",
+    reconnect: true,
   };
 }
 

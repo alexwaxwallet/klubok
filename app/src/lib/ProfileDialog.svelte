@@ -161,6 +161,9 @@
         </label>
       {/if}
       <p class="hint">Пароль хранится: {passwordStorage}.</p>
+      <label class="check">
+        <input type="checkbox" bind:checked={profile.reconnect} /> переподключаться, если связь оборвалась
+      </label>
     </fieldset>
 
     <fieldset>

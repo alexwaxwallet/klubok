@@ -5,6 +5,7 @@
   import ProfileDialog from "$lib/ProfileDialog.svelte";
   import MapPanel from "$lib/MapPanel.svelte";
   import StatusPanel from "$lib/StatusPanel.svelte";
+  import ViewSettings, { applyPrefs, changeSize, loadPrefs } from "$lib/ViewSettings.svelte";
   import AutomationEditor from "$lib/AutomationEditor.svelte";
   import { describeEvent, eventKeyName, normalizeSpec } from "$lib/hotkeys";
   import {
@@ -99,6 +100,8 @@
   let swallowInputUntil = 0;
   let nextId = 0;
   let commandInput: CommandInput;
+  /** Открыта настройка вида (шрифт, размер). */
+  let showView = $state(false);
   let output: Output;
 
   /** Слова из последних строк вывода для дополнения по Tab (сначала свежие). */
@@ -188,6 +191,7 @@
           mapView = event;
           break;
         case "status":
+          reconnectAttempt = 0; // вошли в игру — счётчик попыток с нуля
           status = event;
           break;
         case "mapfound":
@@ -227,9 +231,14 @@
         case "hotkeys":
           setHotkeys(event.hotkeys);
           break;
+        case "connectionlost":
+          add("error", event.text);
+          break;
         case "disconnected":
           add("info", "Соединение закрыто.");
           connected = false;
+          // После того как пачка строк выведена — иначе сообщение окажется выше «Соединение закрыто».
+          setTimeout(maybeReconnect, 0);
           break;
         case "info":
           break; // служебные сообщения пока не показываем
@@ -248,6 +257,57 @@
       }
     } catch (error) {
       note("error", String(error));
+    }
+  }
+
+  // ───────────── переподключение ─────────────
+
+  /** Сколько раз подряд пытались переподключиться (сбрасывается, когда вошли в игру). */
+  let reconnectAttempt = 0;
+  const RECONNECT_MAX = 10;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = $state(null);
+  /** Когда игрок сам попросил выйти («конец», #zap, кнопка) — тогда не переподключаемся. */
+  let quitAt = 0;
+
+  function noteQuit(command: string) {
+    if (/^\s*(конец|quit|#zap|0)\s*$/i.test(command)) quitAt = Date.now();
+  }
+
+  function cancelReconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  /** Соединение закрылось: решаем, переподключаться ли. */
+  function maybeReconnect() {
+    cancelReconnect();
+    if (!selected?.profile.reconnect || Date.now() - quitAt < 15000) return;
+    if (reconnectAttempt >= RECONNECT_MAX) {
+      note("error", `Переподключиться не удалось (${RECONNECT_MAX} попыток).`);
+      reconnectAttempt = 0;
+      return;
+    }
+    reconnectAttempt += 1;
+    // 5, 10, 15… секунд, но не больше 30.
+    const seconds = Math.min(30, 5 * reconnectAttempt);
+    note("info", `Переподключение через ${seconds} с (попытка ${reconnectAttempt})… Отменить — кнопкой вверху.`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      doConnect();
+    }, seconds * 1000);
+  }
+
+  function onConnectButton() {
+    if (reconnectTimer) {
+      cancelReconnect();
+      reconnectAttempt = 0;
+      note("info", "Переподключение отменено.");
+    } else if (connected) {
+      quitAt = Date.now();
+      disconnect();
+    } else {
+      reconnectAttempt = 0;
+      doConnect();
     }
   }
 
@@ -272,6 +332,7 @@
       commandInput.focus();
     } catch (error) {
       note("error", String(error));
+      if (reconnectAttempt > 0) maybeReconnect();
     }
   }
 
@@ -314,6 +375,7 @@
       shown = text.replace(/^(\S+)\s+(.+)$/, (_, name, pass) => `${name} ${"*".repeat(pass.length)}`);
     }
     echo(shown);
+    if (!raw) noteQuit(text);
     try {
       await send(text, raw);
     } catch (error) {
@@ -379,6 +441,11 @@
       output.toBottom();
       return;
     }
+    if (event.ctrlKey && (event.key === "=" || event.key === "+" || event.key === "-")) {
+      event.preventDefault();
+      changeSize(event.key === "-" ? -1 : 1);
+      return;
+    }
     if (event.ctrlKey && event.code === "KeyF") {
       event.preventDefault();
       output.openSearch();
@@ -402,6 +469,7 @@
   }
 
   onMount(() => {
+    applyPrefs(loadPrefs());
     try {
       selectedId = localStorage.getItem(LAST_PROFILE_KEY) ?? "";
     } catch {
@@ -449,12 +517,21 @@
         onclick={() => (editingAutomation = true)}>ƒ</button
       >
       <button class="icon" title="Новый профиль" onclick={() => (editing = null)}>＋</button>
-      <button class="main" class:active={connected} onclick={() => (connected ? disconnect() : doConnect())}>
-        {connected ? "Отключиться" : "Подключиться"}
+      <button class="icon" title="Шрифт и размер" onclick={() => (showView = !showView)}>Aa</button>
+      <button class="main" class:active={connected || reconnectTimer !== null} onclick={onConnectButton}>
+        {reconnectTimer ? "Отменить переподключение" : connected ? "Отключиться" : "Подключиться"}
       </button>
     </div>
   </header>
 
+  {#if showView}
+    <ViewSettings
+      onclose={() => {
+        showView = false;
+        commandInput.focus();
+      }}
+    />
+  {/if}
   <main>
     <section class="terminal">
       <Output {lines} split bind:this={output} onclosesearch={() => commandInput.focus()} />

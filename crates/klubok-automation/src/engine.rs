@@ -149,6 +149,9 @@ pub struct Automation {
     /// Склейка строк (`#merge`).
     pub merges: Vec<MergeRule>,
     merger: Merger,
+    /// Переменные клиента (`$hp`, `$room`…): их задаёт сессия из MSDP, в настройки они не пишутся.
+    /// Если игрок сам заведёт переменную с таким именем — она его, клиент её не трогает.
+    system_vars: BTreeSet<String>,
     /// Выключенные группы (`#group disable имя`).
     pub disabled_groups: BTreeSet<String>,
     /// Строки настроек, которые клиент пока не понимает, — сохраняются при записи.
@@ -967,7 +970,19 @@ impl Automation {
         }
     }
 
+    /// Переменная клиента из MSDP (`$hp`, `$room`…). Не сохраняется в настройках
+    /// и не трогает переменную игрока с тем же именем.
+    pub fn set_system_var(&mut self, name: &str, value: &str) {
+        if self.variables.contains_key(name) && !self.system_vars.contains(name) {
+            return;
+        }
+        self.system_vars.insert(name.to_string());
+        self.variables.insert(name.to_string(), value.to_string());
+    }
+
     fn set_variable(&mut self, name: &str, value: &str, fx: &mut Vec<Effect>) {
+        // Игрок сам задал переменную — теперь она его.
+        self.system_vars.remove(name);
         if self.variables.get(name).map(String::as_str) != Some(value) {
             self.variables.insert(name.to_string(), value.to_string());
             fx.push(Effect::Changed);
@@ -1259,6 +1274,7 @@ impl Automation {
                     }
                 }
                 "variable" | "var" if !args.is_empty() => {
+                    self.system_vars.remove(&arg(0));
                     self.variables.insert(arg(0), args[1..].join(" "));
                     report.variables += 1;
                 }
@@ -1350,7 +1366,9 @@ impl Automation {
             line("#speedwalk on".to_string());
         }
         for (name, value) in &self.variables {
-            line(format!("#variable {} {}", braced(name), braced(value)));
+            if !self.system_vars.contains(name) {
+                line(format!("#variable {} {}", braced(name), braced(value)));
+            }
         }
         for a in &self.aliases {
             line(format!(
@@ -2246,4 +2264,24 @@ mod tests {
         assert!(!a.speedwalk);
         assert!(!a.to_script().contains("#speedwalk"));
     }
+
+    #[test]
+    fn переменные_клиента_не_сохраняются() {
+        let mut a = Automation::new();
+        a.import("#variable {target} {волк}");
+        a.set_system_var("hp", "120");
+        a.set_system_var("target", "чужое");
+        // В командах работают, в настройки не пишутся, переменную игрока не трогают.
+        let fx = a.user_input("say $hp $target");
+        assert!(matches!(&fx[0], Effect::Send(c) if c == "say 120 волк"));
+        let text = a.to_script();
+        assert!(!text.contains("hp"));
+        assert!(text.contains("волк"));
+        // Игрок задал сам — теперь сохраняется.
+        a.user_input("#var hp 5");
+        assert!(a.to_script().contains("#variable {hp} {5}"));
+        a.set_system_var("hp", "999");
+        assert!(a.to_script().contains("#variable {hp} {5}"));
+    }
 }
+

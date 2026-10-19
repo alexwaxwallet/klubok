@@ -199,7 +199,7 @@
     padding: 8px 12px;
     font-family: var(--mono);
     font-size: var(--font-size);
-    line-height: 1.3;
+    line-height: var(--line-height, 1.3);
     user-select: text;
   }
 
@@ -263,7 +263,7 @@
   .line {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    min-height: 1.3em;
+    min-height: calc(var(--line-height, 1.3) * 1em);
   }
 
   .line.found {

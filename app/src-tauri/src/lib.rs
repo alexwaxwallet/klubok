@@ -391,7 +391,7 @@ fn connect(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(),
         if let Err(error) = result {
             let _ = app_for_session.emit(
                 "session",
-                vec![UiEvent::Error {
+                vec![UiEvent::ConnectionLost {
                     text: format!("{address}: {error}"),
                 }],
             );
